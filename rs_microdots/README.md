@@ -1,6 +1,6 @@
-# rust_anoto_dots
+### rust_anoto_dots
 
-### > rust version of cheind/py-microdots
+### rust version of (cheind/py-microdots)[https://github.com/cheind/py-microdots]
 
 ---
 
