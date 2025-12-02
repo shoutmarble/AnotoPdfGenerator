@@ -44,11 +44,13 @@ pub fn draw_dots(
                 let x_bit = bitmatrix[[y, x, 0]] as usize;
                 let y_bit = bitmatrix[[y, x, 1]] as usize;
                 let dot_type = x_bit + (y_bit << 1);
+                let orange = RGBColor(255, 165, 0);
+                let custom_green = RGBColor(100, 156, 54);
                 let color = match dot_type {
-                    0 => &BLACK, // UP
-                    1 => &BLUE,  // LEFT
-                    2 => &RED,   // RIGHT
-                    3 => &GREEN, // DOWN
+                    0 => &custom_green, // UP
+                    1 => &BLUE,    // LEFT
+                    2 => &MAGENTA, // RIGHT
+                    3 => &orange,  // DOWN
                     _ => &BLACK,
                 };
                 let mut x_x :i32 = x as i32;
@@ -117,11 +119,13 @@ pub fn draw_dots_y_axis(
                 let x_bit = bitmatrix[[y, x, 0]] as usize;
                 let y_bit = bitmatrix[[y, x, 1]] as usize;
                 let dot_type = x_bit + (y_bit << 1);
+                let orange = RGBColor(255, 165, 0);
+                let custom_green = RGBColor(100, 156, 54);
                 let color = match dot_type {
-                    0 => &BLACK, // UP
-                    1 => &BLUE,  // LEFT
-                    2 => &RED,   // RIGHT
-                    3 => &GREEN, // DOWN
+                    0 => &custom_green, // UP
+                    1 => &BLUE,    // LEFT
+                    2 => &MAGENTA, // RIGHT
+                    3 => &orange,  // DOWN
                     _ => &BLACK,
                 };
                 let mut x_x :i32 = x as i32;

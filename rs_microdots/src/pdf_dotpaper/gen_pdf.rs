@@ -159,21 +159,21 @@ fn draw_anoto_dot(page: &mut Page, x: f64, y: f64, direction: AnotoDot) {
         AnotoDot::Up => {
             let y_up = y + 3.0;
             page.graphics()
-                .set_fill_color(Color::blue())
+                .set_fill_color(Color::rgb(100.0 / 255.0, 156.0 / 255.0, 54.0 / 255.0))
                 .circle(x, y_up, radius)
                 .fill();
         },
         AnotoDot::Down => {
             let y_down = y - 3.0;
             page.graphics()
-                .set_fill_color(Color::black())
+                .set_fill_color(Color::rgb(1.0, 0.647, 0.0))
                 .circle(x, y_down, radius)
                 .fill();
         },
         AnotoDot::Left => {
             let x_left = x - 3.0;
             page.graphics()
-                .set_fill_color(Color::red())
+                .set_fill_color(Color::blue())
                 .circle(x_left, y, radius)
                 .fill();
         },
