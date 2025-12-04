@@ -6,7 +6,8 @@ use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
 use anoto_pdf::anoto_matrix::generate_matrix_only;
 use anoto_pdf::make_plots::{draw_preview_image, draw_dot_on_file};
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, mpsc, Mutex};
+use std::sync::Arc;
 
 use anoto_pdf::codec::anoto_6x6_a4_fixed;
 use serde_json::Value;
@@ -39,6 +40,8 @@ struct Gui {
     server_port: String,
     server_shutdown_tx: Option<oneshot::Sender<()>>,
     server_status_text: String,
+    server_rx: Option<Arc<Mutex<mpsc::Receiver<String>>>>,
+    rest_post_content: text_editor::Content,
     json_input: text_editor::Content,
     decoded_result: String,
     lookup_sect_u: String,
@@ -77,6 +80,8 @@ enum Message {
     ServerPortChanged(String),
     ToggleServer,
     ServerStarted(Result<(), String>),
+    RestPostReceived(Option<String>),
+    RestPostContentChanged(text_editor::Action),
     JsonInputChanged(text_editor::Action),
     DecodeJson,
     LookupSectUChanged(String),
@@ -110,6 +115,8 @@ impl Default for Gui {
             server_port: "8080".to_string(),
             server_shutdown_tx: None,
             server_status_text: "Server Stopped".to_string(),
+            server_rx: None,
+            rest_post_content: text_editor::Content::new(),
             json_input: text_editor::Content::new(),
             decoded_result: "Ready to decode".to_string(),
             lookup_sect_u: "10".to_string(),
@@ -203,17 +210,72 @@ impl Gui {
                         let _ = tx.send(());
                     }
                     self.server_status_text = "Server Stopped".to_string();
+                    self.server_rx = None;
                 } else {
                     // Start server
                     let port_str = self.server_port.clone();
                     let (tx, rx) = oneshot::channel();
+                    let (msg_tx, msg_rx) = mpsc::channel(100);
                     self.server_shutdown_tx = Some(tx);
+                    let rx_arc = Arc::new(Mutex::new(msg_rx));
+                    self.server_rx = Some(rx_arc.clone());
                     self.server_status_text = "Starting Server...".to_string();
 
-                    return Task::perform(async move {
-                        start_server_task(port_str, rx).await
-                    }, Message::ServerStarted);
+                    return Task::batch(vec![
+                        Task::perform(async move {
+                            start_server_task(port_str, rx, msg_tx).await
+                        }, Message::ServerStarted),
+                        listen_for_post(rx_arc)
+                    ]);
                 }
+            }
+            Message::RestPostReceived(content) => {
+                if let Some(c) = content {
+                    let clean_c = c.trim();
+                    let json_candidate = if clean_c.starts_with('\'') && clean_c.ends_with('\'') {
+                        &clean_c[1..clean_c.len()-1]
+                    } else {
+                        clean_c
+                    };
+
+                    let formatted_content = if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
+                        if let Some(arr) = val.as_array() {
+                            // Check if it's a 2D array
+                            if arr.iter().all(|item| item.is_array()) {
+                                let mut s = String::from("[\n");
+                                for (i, row) in arr.iter().enumerate() {
+                                    s.push_str("  ");
+                                    s.push_str(&serde_json::to_string(row).unwrap_or_default());
+                                    if i < arr.len() - 1 {
+                                        s.push_str(",\n");
+                                    } else {
+                                        s.push_str("\n");
+                                    }
+                                }
+                                s.push_str("]");
+                                s
+                            } else {
+                                serde_json::to_string_pretty(&val).unwrap_or(json_candidate.to_string())
+                            }
+                        } else {
+                            serde_json::to_string_pretty(&val).unwrap_or(json_candidate.to_string())
+                        }
+                    } else {
+                        // Fallback heuristic formatting for when JSON parsing fails (e.g. missing quotes)
+                        json_candidate.to_string()
+                            .replace("],", "],\n  ")
+                            .replace("], ", "],\n  ")
+                            .replace("[[", "[\n  [")
+                            .replace("]]", "]\n]")
+                    };
+                    self.rest_post_content = text_editor::Content::with_text(&formatted_content);
+                    if let Some(rx) = &self.server_rx {
+                        return listen_for_post(rx.clone());
+                    }
+                }
+            }
+            Message::RestPostContentChanged(action) => {
+                self.rest_post_content.perform(action);
             }
             Message::ServerStarted(result) => {
                 match result {
@@ -625,6 +687,33 @@ impl Gui {
         })
         .width(Length::Fixed(200.0));
 
+        let rest_post_controls = container(column![
+            text("JSON 6x6+ REST Service Post").size(20),
+            vertical_space().height(10),
+            text_editor(&self.rest_post_content)
+                .on_action(Message::RestPostContentChanged)
+                .height(Length::Fixed(300.0))
+                .font(iced::font::Font::MONOSPACE)
+                .wrapping(iced::widget::text::Wrapping::None),
+            vertical_space().height(10),
+            button("JSON 6x6 REST post")
+                .padding(10)
+                .width(Length::Fill),
+            vertical_space().height(10),
+            text("Ready to decode").size(14),
+        ]
+        .spacing(10))
+        .padding(20)
+        .style(|_theme| container::Style {
+            border: Border {
+                color: Color::from_rgb(0.5, 0.5, 0.5),
+                width: 2.0,
+                radius: 5.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .width(Length::Fixed(250.0));
+
         let right_column = column![
             server_controls,
             vertical_space().height(20),
@@ -636,10 +725,16 @@ impl Gui {
         ]
         .padding(20);
 
+        let new_column = column![
+            rest_post_controls
+        ]
+        .padding(20);
+
         row![
             image_preview,
             scrollable(controls).width(Length::Fixed(480.0)),
-            scrollable(right_column)
+            scrollable(right_column),
+            scrollable(new_column)
         ]
         .into()
     }
@@ -790,7 +885,14 @@ fn perform_pattern_lookup(sect_u_str: &str, sect_v_str: &str, x_str: &str, y_str
     result
 }
 
-async fn start_server_task(port_str: String, rx: oneshot::Receiver<()>) -> Result<(), String> {
+fn listen_for_post(rx: Arc<Mutex<mpsc::Receiver<String>>>) -> Task<Message> {
+    Task::perform(async move {
+        let mut lock = rx.lock().await;
+        lock.recv().await
+    }, Message::RestPostReceived)
+}
+
+async fn start_server_task(port_str: String, rx: oneshot::Receiver<()>, msg_tx: mpsc::Sender<String>) -> Result<(), String> {
     let port = port_str.parse::<u16>().map_err(|_| "Invalid port")?;
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
 
@@ -821,7 +923,10 @@ async fn start_server_task(port_str: String, rx: oneshot::Receiver<()>) -> Resul
                 }
             };
 
-            let app = axum::Router::new().route("/", axum::routing::get(index_handler));
+            let app = axum::Router::new()
+                .route("/", axum::routing::get(index_handler))
+                .route("/decode", axum::routing::post(decode_handler))
+                .layer(axum::Extension(msg_tx));
 
             if let Err(e) = axum::serve(listener, app)
                 .with_graceful_shutdown(async { rx.await.ok(); })
@@ -840,6 +945,14 @@ async fn start_server_task(port_str: String, rx: oneshot::Receiver<()>) -> Resul
 
 async fn index_handler() -> axum::response::Html<&'static str> {
     axum::response::Html(INDEX_HTML)
+}
+
+async fn decode_handler(
+    axum::Extension(msg_tx): axum::Extension<mpsc::Sender<String>>,
+    body: String
+) -> impl axum::response::IntoResponse {
+    let _ = msg_tx.send(body).await;
+    axum::http::StatusCode::OK
 }
 
 const INDEX_HTML: &str = r#"

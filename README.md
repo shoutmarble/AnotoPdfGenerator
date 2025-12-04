@@ -5,16 +5,16 @@
 ---
 ![anoto pdf gui](src/assets/anoto_pdf.png)
 
-> cargo build   
-> > may require  
-> >  
-> > sudo apt install  
-> > pkg-config  
-> > libfreetype6-dev  
-> > libfontconfig1-dev   
-> > librsvg2-bin  
 
----
+
+> Test the Anoto 6x6 Rest Service
+> > ```
+> > curl -H "Content-Type: application/json" -d '[["↓","←","←","→","←","→"],["→","↑","←","→","↑","↑"],["→","→","↑","↑","←","↓"],["←","←","↑","↓","→","↓"],["→","↑","→","←","↑","←"],["←","↑","↓","↓","→","↑"]]' http://localhost:8080/decode 
+> > ```
+
+
+
+----
 
 ```
 PS C:\Users\xxxxx\Documents\git\anoto_verify_rust\rs_microdots> .\anoto_dots.exe -h
