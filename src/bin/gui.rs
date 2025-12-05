@@ -5,7 +5,7 @@ use iced::event;
 use iced_aw::spinner::Spinner;
 use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
 use anoto_pdf::anoto_matrix::generate_matrix_only;
-use anoto_pdf::make_plots::{draw_preview_image, draw_dot_on_file};
+use anoto_pdf::make_plots::{draw_preview_image, draw_dot_on_file, draw_dots_on_file};
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
 use tokio::sync::{oneshot, mpsc, Mutex};
 use std::sync::Arc;
@@ -58,6 +58,8 @@ struct Gui {
     image_width: u32,
     image_height: u32,
     scrollable_id: scrollable::Id,
+    points_input: text_editor::Content,
+    points_status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +103,9 @@ enum Message {
     DrawDotFinished(Result<image::Handle, String>),
     PreviewZoomed(f32, Point),
     PreviewPanned(Vector),
+    PointsInputChanged(text_editor::Action),
+    PlotAllPoints,
+    PlotAllPointsFinished(Result<image::Handle, String>),
 }
 
 impl Default for Gui {
@@ -139,6 +144,8 @@ impl Default for Gui {
             image_width: 0,
             image_height: 0,
             scrollable_id: scrollable::Id::unique(),
+            points_input: text_editor::Content::new(),
+            points_status: "Ready".to_string(),
         }
     }
 }
@@ -373,6 +380,34 @@ impl Gui {
                             .replace("]]", "]\n]")
                     };
                     self.rest_post_content = text_editor::Content::with_text(&formatted_content);
+
+                    // Attempt to decode and add to points list
+                    let decode_res = decode_json_input(json_candidate);
+                    
+                    if decode_res.contains("Position: ") {
+                        println!("Decode success");
+                        let clean_coords = decode_res.lines()
+                            .filter(|l| l.starts_with("Position: "))
+                            .map(|l| l.trim_start_matches("Position: ").trim())
+                            .collect::<Vec<&str>>()
+                            .join("\n");
+
+                        if !clean_coords.is_empty() {
+                            let current_text = self.points_input.text();
+                            let new_text = if current_text.is_empty() {
+                                clean_coords
+                            } else {
+                                format!("{}\n{}", current_text, clean_coords)
+                            };
+                            self.points_input = text_editor::Content::with_text(&new_text);
+                            self.points_status = "Decoded successfully".to_string();
+                        }
+                    } else {
+                        println!("Decode failed: {}", decode_res);
+                        println!("Received input (first 500 chars): {:.500}", json_candidate);
+                        self.points_status = format!("Decode failed: {}", decode_res);
+                    }
+
                     if let Some(rx) = &self.server_rx {
                         return listen_for_post(rx.clone());
                     }
@@ -499,6 +534,49 @@ impl Gui {
                         self.generated_image_handle = Some(handle);
                     }
                     Err(e) => self.draw_status = format!("Error: {}", e),
+                }
+            }
+            Message::PointsInputChanged(action) => {
+                self.points_input.perform(action);
+            }
+            Message::PlotAllPoints => {
+                if let Some(path) = &self.current_png_path {
+                    let text = self.points_input.text();
+                    let points = parse_points(&text);
+                    if points.is_empty() {
+                        self.points_status = "No valid points found".to_string();
+                    } else {
+                        let config = self.config.clone();
+                        let matrix_width = self.width;
+                        let matrix_height = self.height;
+                        let path_clone = path.clone();
+                        
+                        self.points_status = format!("Plotting {} points...", points.len());
+
+                        return Task::perform(async move {
+                            match draw_dots_on_file(&path_clone, &points, matrix_height, matrix_width, &config) {
+                                Ok(_) => {
+                                    // Reload the image
+                                     match std::fs::read(&path_clone) {
+                                        Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
+                                        Err(e) => Err(e.to_string())
+                                     }
+                                },
+                                Err(e) => Err(e.to_string())
+                            }
+                        }, Message::PlotAllPointsFinished);
+                    }
+                } else {
+                    self.points_status = "Generate PDF first!".to_string();
+                }
+            }
+            Message::PlotAllPointsFinished(result) => {
+                match result {
+                    Ok(handle) => {
+                        self.points_status = "Points plotted!".to_string();
+                        self.generated_image_handle = Some(handle);
+                    }
+                    Err(e) => self.points_status = format!("Error: {}", e),
                 }
             }
             Message::PreviewZoomed(delta, cursor) => {
@@ -836,7 +914,7 @@ impl Gui {
         .width(Length::Fixed(200.0));
 
         let rest_post_controls = container(column![
-            text("JSON 6x6+ REST Service Post").size(20),
+            text("JSON 6x6+ REST Listener").size(20),
             vertical_space().height(10),
             text_editor(&self.rest_post_content)
                 .on_action(Message::RestPostContentChanged)
@@ -844,11 +922,18 @@ impl Gui {
                 .font(iced::font::Font::MONOSPACE)
                 .wrapping(iced::widget::text::Wrapping::None),
             vertical_space().height(10),
-            button("JSON 6x6 REST post")
+            text("Ready to decode").size(14),
+            vertical_space().height(20),
+            text("(X,Y) Decoder").size(20),
+            text_editor(&self.points_input)
+                .on_action(Message::PointsInputChanged)
+                .height(Length::Fixed(150.0))
+                .font(iced::font::Font::MONOSPACE),
+            button("Plot on A4")
+                .on_press(Message::PlotAllPoints)
                 .padding(10)
                 .width(Length::Fill),
-            vertical_space().height(10),
-            text("Ready to decode").size(14),
+            text(&self.points_status).size(14),
         ]
         .spacing(10))
         .padding(20)
@@ -888,13 +973,47 @@ impl Gui {
     }
 }
 
+fn parse_points(input: &str) -> Vec<(f64, f64)> {
+    let mut points = Vec::new();
+    // Split by closing parenthesis to separate potential points
+    let parts: Vec<&str> = input.split(')').collect();
+    for part in parts {
+        // Find the last opening parenthesis in this part
+        if let Some(start) = part.rfind('(') {
+            let content = &part[start+1..];
+            // Split by comma
+            if let Some(comma) = content.find(',') {
+                let x_str = &content[..comma].trim();
+                let y_str = &content[comma+1..].trim();
+                if let (Ok(x), Ok(y)) = (x_str.parse::<f64>(), y_str.parse::<f64>()) {
+                    points.push((x, y));
+                }
+            } else {
+                // Maybe space separated?
+                let coords: Vec<&str> = content.split_whitespace().collect();
+                if coords.len() >= 2 {
+                     if let (Ok(x), Ok(y)) = (coords[0].parse::<f64>(), coords[1].parse::<f64>()) {
+                        points.push((x, y));
+                    }
+                }
+            }
+        }
+    }
+    points
+}
+
 fn decode_json_input(input: &str) -> String {
-    let parsed: Value = match serde_json::from_str(input) {
+    let mut parsed: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => return format!("JSON Parse Error: {}", e),
     };
 
-    let mut bits = ndarray::Array3::<i8>::zeros((6, 6, 2));
+    // If parsed is a string, try to parse it as JSON again (handles cmd.exe sending "[[...]]")
+    if let Some(s) = parsed.as_str() {
+        if let Ok(v) = serde_json::from_str(s) {
+            parsed = v;
+        }
+    }
 
     // Helper to map direction to bits
     let map_direction = |dir: &str| -> Option<(i8, i8)> {
@@ -917,81 +1036,121 @@ fn decode_json_input(input: &str) -> String {
         }
     };
 
-    if let Some(arr) = parsed.as_array() {
-        if arr.len() != 6 {
-            return "JSON must be a 6x6 array".to_string();
-        }
-
-        for (r, row) in arr.iter().enumerate() {
-            if let Some(row_arr) = row.as_array() {
-                if row_arr.len() != 6 {
-                    return format!("Row {} must have 6 elements", r);
+    let map_cell = |cell: &Value| -> Option<(i8, i8)> {
+        if let Some(cell_arr) = cell.as_array() {
+            // Case: [0,0]
+            if cell_arr.len() == 2 {
+                let x = cell_arr[0].as_i64();
+                let y = cell_arr[1].as_i64();
+                if let (Some(x), Some(y)) = (x, y) {
+                    return map_coords(x, y);
+                } else {
+                    // Maybe it's ["↑"]
+                    if let Some(s) = cell_arr[0].as_str() {
+                         return map_direction(s);
+                    }
                 }
-
-                for (c, cell) in row_arr.iter().enumerate() {
-                    let (b0, b1) = if let Some(cell_arr) = cell.as_array() {
-                        // Case: [[0,0], ...]
-                        if cell_arr.len() == 2 {
-                            let x = cell_arr[0].as_i64();
-                            let y = cell_arr[1].as_i64();
-                            if let (Some(x), Some(y)) = (x, y) {
-                                if let Some(bits) = map_coords(x, y) {
-                                    bits
-                                } else {
-                                    return format!("Invalid coordinate ({}, {}) at [{}, {}]", x, y, r, c);
-                                }
-                            } else {
-                                // Maybe it's ["↑"]
-                                if let Some(s) = cell_arr[0].as_str() {
-                                     if let Some(bits) = map_direction(s) {
-                                        bits
-                                     } else {
-                                        return format!("Invalid direction string '{}' at [{}, {}]", s, r, c);
-                                     }
-                                } else {
-                                    return format!("Invalid cell format at [{}, {}]", r, c);
-                                }
-                            }
-                        } else if cell_arr.len() == 1 {
-                             // Case: [["↑"], ...]
-                             if let Some(s) = cell_arr[0].as_str() {
-                                 if let Some(bits) = map_direction(s) {
-                                    bits
-                                 } else {
-                                    return format!("Invalid direction string '{}' at [{}, {}]", s, r, c);
-                                 }
-                             } else {
-                                return format!("Invalid cell format at [{}, {}]", r, c);
-                             }
-                        } else {
-                            return format!("Invalid cell array length at [{}, {}]", r, c);
-                        }
-                    } else if let Some(s) = cell.as_str() {
-                        // Case: ["↑", ...]
-                        if let Some(bits) = map_direction(s) {
-                            bits
-                        } else {
-                            return format!("Invalid direction string '{}' (bytes: {:?}) at [{}, {}]", s, s.as_bytes(), r, c);
-                        }
-                    } else {
-                        return format!("Invalid cell type at [{}, {}]", r, c);
-                    };
-
-                    bits[[r, c, 0]] = b0;
-                    bits[[r, c, 1]] = b1;
-                }
-            } else {
-                return format!("Row {} is not an array", r);
+            } else if cell_arr.len() == 1 {
+                 // Case: ["↑"]
+                 if let Some(s) = cell_arr[0].as_str() {
+                     return map_direction(s);
+                 }
             }
+        } else if let Some(s) = cell.as_str() {
+            // Case: "↑"
+            return map_direction(s);
         }
-    } else {
-        return "JSON must be an array".to_string();
+        None
+    };
+
+    // Find the matrix
+    let mut matrix_val = &parsed;
+    while let Some(arr) = matrix_val.as_array() {
+        if arr.is_empty() { return "Empty array".to_string(); }
+        
+        if let Some(first_row) = arr[0].as_array() {
+             if first_row.is_empty() { return "Empty row".to_string(); }
+             
+             let is_cell = |v: &Value| {
+                 if v.is_string() { true }
+                 else if let Some(a) = v.as_array() {
+                     // It's a cell if it's [num, num] or ["str"]
+                     // It's NOT a cell if it's [[...]] (array of arrays)
+                     !a.is_empty() && !a[0].is_array()
+                 } else {
+                     false
+                 }
+             };
+             
+             if is_cell(&first_row[0]) {
+                 // Found the matrix!
+                 break;
+             } else {
+                 // Go deeper
+                 matrix_val = &arr[0];
+             }
+        } else {
+            return "Invalid structure".to_string();
+        }
     }
 
+    let rows = match matrix_val.as_array() {
+        Some(a) => a,
+        None => return "Could not find matrix array".to_string(),
+    };
+
+    let mut grid = Vec::new();
+    for (r_idx, row_val) in rows.iter().enumerate() {
+        let row_arr = match row_val.as_array() {
+            Some(a) => a,
+            None => return format!("Row {} is not an array", r_idx),
+        };
+        let mut row_bits = Vec::new();
+        for (c_idx, cell_val) in row_arr.iter().enumerate() {
+            match map_cell(cell_val) {
+                Some(bits) => row_bits.push(bits),
+                None => return format!("Invalid cell at [{}, {}]", r_idx, c_idx),
+            }
+        }
+        grid.push(row_bits);
+    }
+
+    let height = grid.len();
+    if height < 6 { return "Matrix too small (height < 6)".to_string(); }
+    let width = grid[0].len();
+    if width < 6 { return "Matrix too small (width < 6)".to_string(); }
+
+    // Check all rows have same width
+    if grid.iter().any(|r| r.len() != width) {
+        return "Matrix rows have inconsistent lengths".to_string();
+    }
+
+    let mut results = String::new();
     let codec = anoto_6x6_a4_fixed();
-    match codec.decode_position(&bits) {
-        Ok((x, y)) => format!("Position: ({}, {})", x, y),
-        Err(e) => format!("Decoding Error: {}", e),
+
+    for r in 0..=(height - 6) {
+        for c in 0..=(width - 6) {
+            // Extract 6x6
+            let mut bits = ndarray::Array3::<i8>::zeros((6, 6, 2));
+            for i in 0..6 {
+                for j in 0..6 {
+                    let (b0, b1) = grid[r+i][c+j];
+                    bits[[i, j, 0]] = b0;
+                    bits[[i, j, 1]] = b1;
+                }
+            }
+
+            if let Ok((x, y)) = codec.decode_position(&bits) {
+                if !results.is_empty() { results.push('\n'); }
+                results.push_str(&format!("Position: ({}, {})", x, y));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        "No valid positions found".to_string()
+    } else {
+        results
     }
 }
 

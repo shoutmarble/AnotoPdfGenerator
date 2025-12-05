@@ -136,6 +136,59 @@ pub fn draw_dot_on_file(
     Ok(())
 }
 
+pub fn draw_dots_on_file(
+    filename: &str,
+    points: &[(f64, f64)],
+    matrix_height: usize,
+    matrix_width: usize,
+    config: &PdfConfig,
+) -> Result<(), Box<dyn Error>> {
+    // Load image
+    let mut img = image::open(filename)?.to_rgba8();
+    
+    // A4 dimensions in points
+    let a4_width_pts = 595.276;
+    let a4_height_pts = 841.89;
+    
+    // Scale factor
+    let scale = config.dpi as f64 / 72.0;
+    
+    let grid_width = (matrix_width as f64 - 1.0) * config.grid_spacing as f64;
+    let grid_height = (matrix_height as f64 - 1.0) * config.grid_spacing as f64;
+    
+    let margin_x = (a4_width_pts - grid_width) / 2.0;
+    let margin_y = (a4_height_pts - grid_height) / 2.0;
+    
+    let (w, h) = img.dimensions();
+    let color = image::Rgba([255, 0, 0, 255]);
+    let radius = (config.dot_size as f64 * scale * 2.0).max(5.0) as i32;
+
+    for (x, y) in points {
+        let x_pos_pt = margin_x + x * config.grid_spacing as f64;
+        let y_pos_pt = margin_y + y * config.grid_spacing as f64;
+        
+        // Convert to pixels
+        // Plotters cartesian (0,0) is bottom-left. Pixel (0,0) is top-left.
+        let x_px = (x_pos_pt * scale).round() as i32;
+        let y_px = ((a4_height_pts - y_pos_pt) * scale).round() as i32;
+        
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx*dx + dy*dy <= radius*radius {
+                    let px = x_px + dx;
+                    let py = y_px + dy;
+                    if px >= 0 && px < w as i32 && py >= 0 && py < h as i32 {
+                        img.put_pixel(px as u32, py as u32, color);
+                    }
+                }
+            }
+        }
+    }
+    
+    img.save(filename)?;
+    Ok(())
+}
+
 // Drawing function using plotters
 pub fn draw_dots(
     bitmatrix: &ndarray::Array3<i8>,
