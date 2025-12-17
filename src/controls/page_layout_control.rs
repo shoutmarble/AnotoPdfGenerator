@@ -1,18 +1,10 @@
-use iced::widget::{checkbox, column, row, slider, text, vertical_space, container};
-use iced::{Element, Length, Alignment, Border, Color};
+use iced::widget::{checkbox, column, container, row, slider, space, text};
+use iced::{Alignment, Border, Color, Element, Length};
 use iced_aw::number_input::NumberInput;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct State {
     pub autodetect: bool,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            autodetect: false,
-        }
-    }
 }
 
 pub fn page_layout_control<'a, Message>(
@@ -28,28 +20,49 @@ where
 {
     let on_width_change_slider = on_width_change.clone();
     let width_ctrl = row![
-        slider(1.0..=200.0, width as f64, move |v| on_width_change_slider(v as usize)).step(1.0).width(Length::Fill),
+        slider(1.0..=200.0, width as f64, move |v| on_width_change_slider(
+            v as usize
+        ))
+        .step(1.0)
+        .width(Length::Fill),
         NumberInput::new(&width, 1..=200, on_width_change)
             .step(1)
             .width(Length::Fixed(60.0))
-    ].spacing(10).align_y(Alignment::Center);
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
     let on_height_change_slider = on_height_change.clone();
     let height_ctrl = row![
-        slider(1.0..=200.0, height as f64, move |v| on_height_change_slider(v as usize)).step(1.0).width(Length::Fill),
+        slider(
+            1.0..=200.0,
+            height as f64,
+            move |v| on_height_change_slider(v as usize)
+        )
+        .step(1.0)
+        .width(Length::Fill),
         NumberInput::new(&height, 1..=200, on_height_change)
             .step(1)
             .width(Length::Fixed(60.0))
-    ].spacing(10).align_y(Alignment::Center);
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
     let content = container(column![
-        text("Number of dots on X-axis horizontally across").size(14).color([0.2, 0.2, 0.8]),
+        text("Number of dots on X-axis horizontally across")
+            .size(14)
+            .color([0.2, 0.2, 0.8]),
         width_ctrl,
-        vertical_space().height(10),
-        text("Number of dots on Y-axis vertically across").size(14).color([0.8, 0.2, 0.8]),
+        space().height(Length::Fixed(10.0)),
+        text("Number of dots on Y-axis vertically across")
+            .size(14)
+            .color([0.8, 0.2, 0.8]),
         height_ctrl,
-        vertical_space().height(20),
-        checkbox("Autodetect number of X-Axis and Y-Axis dots to fill an A4 page at set DPI level", state.autodetect)
+        space().height(Length::Fixed(20.0)),
+        checkbox(state.autodetect)
+            .label(
+                "Autodetect number of X-Axis and Y-Axis dots to fill an A4 page at set DPI level"
+            )
             .on_toggle(on_autodetect_change)
             .size(20)
             .text_size(14)
@@ -66,10 +79,10 @@ where
     });
 
     if state.autodetect {
-        // If autodetect is on, we might want to disable the inputs, 
+        // If autodetect is on, we might want to disable the inputs,
         // but iced doesn't have a generic "disable" wrapper easily accessible for all widgets without custom styles or logic.
         // For now, we just render them. The logic in the main app should prevent updates or overwrite them.
-        // Or we could not pass the `on_change` events? 
+        // Or we could not pass the `on_change` events?
         // But the signature requires them.
         // We can wrap them in a container that intercepts events? No.
         // We'll rely on the main app logic to enforce the values.

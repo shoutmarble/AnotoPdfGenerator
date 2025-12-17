@@ -36,7 +36,10 @@ pub fn save_bitmatrix_json(bitmatrix: &Array3<i8>, filename: &str) -> Result<(),
 
 pub fn save_as_json(bitmatrix: &Array3<i32>, base_filename: &str) -> Result<(), Box<dyn Error>> {
     let filename = format!("output/{}.json", base_filename);
-    let data: Vec<Vec<Vec<i32>>> = bitmatrix.outer_iter().map(|row| row.outer_iter().map(|col| col.to_vec()).collect()).collect();
+    let data: Vec<Vec<Vec<i32>>> = bitmatrix
+        .outer_iter()
+        .map(|row| row.outer_iter().map(|col| col.to_vec()).collect())
+        .collect();
     let file = File::create(filename)?;
     serde_json::to_writer(file, &data)?;
     Ok(())
@@ -115,14 +118,14 @@ pub fn load_6x6_from_text(file_path: &str) -> Result<Array3<i8>, Box<dyn Error>>
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
     let mut data = Vec::new();
-    
+
     for line_result in reader.lines() {
         let line = line_result?;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        
+
         let mut row_data = Vec::new();
         // Parse pairs like "[1 1] [1 0] ..."
         let pairs: Vec<&str> = line.split("] [").collect();
@@ -134,30 +137,35 @@ pub fn load_6x6_from_text(file_path: &str) -> Result<Array3<i8>, Box<dyn Error>>
             } else {
                 *pair
             };
-            
+
             let nums: Vec<i8> = clean_pair
                 .split_whitespace()
                 .filter_map(|s| s.parse().ok())
                 .collect();
-            
+
             if nums.len() != 2 {
                 return Err(format!("Invalid pair format in line: {}", line).into());
             }
-            
+
             row_data.push(nums);
         }
-        
+
         if row_data.len() != 6 {
-            return Err(format!("Expected 6 pairs per row, got {} in line: {}", row_data.len(), line).into());
+            return Err(format!(
+                "Expected 6 pairs per row, got {} in line: {}",
+                row_data.len(),
+                line
+            )
+            .into());
         }
-        
+
         data.push(row_data);
     }
-    
+
     if data.len() != 6 {
         return Err(format!("Expected 6 rows, got {}", data.len()).into());
     }
-    
+
     // Convert to Array3<i8>
     let mut array3 = Array3::zeros((6, 6, 2));
     for (i, row) in data.into_iter().enumerate() {
@@ -166,6 +174,6 @@ pub fn load_6x6_from_text(file_path: &str) -> Result<Array3<i8>, Box<dyn Error>>
             array3[[i, j, 1]] = pair[1];
         }
     }
-    
+
     Ok(array3)
 }

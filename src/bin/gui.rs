@@ -1,14 +1,19 @@
-use iced::widget::{button, column, container, row, scrollable, slider, text, text_editor, text_input, vertical_space, canvas};
-use iced::widget::image;
-use iced::{Element, Length, Task, Border, Color, Shadow, Point, Vector, Rectangle, Renderer, Theme, mouse};
-use iced::event;
-use iced_aw::spinner::Spinner;
-use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
 use anoto_pdf::anoto_matrix::generate_matrix_only;
-use anoto_pdf::make_plots::{draw_preview_image, draw_dot_on_file, draw_dots_on_file};
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
-use tokio::sync::{oneshot, mpsc, Mutex};
+use anoto_pdf::make_plots::{draw_dot_on_file, draw_dots_on_file, draw_preview_image};
+use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
+use iced::widget::image;
+use iced::widget::{
+    Action, button, canvas, column, container, row, scrollable, slider, space, text, text_editor,
+    text_input,
+};
+use iced::{
+    Border, Color, Element, Length, Point, Rectangle, Renderer, Shadow, Task, Theme, Vector, mouse,
+};
+use iced_aw::spinner::Spinner;
+use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use anoto_pdf::codec::anoto_6x6_a4_fixed;
 use serde_json::Value;
@@ -16,10 +21,12 @@ use serde_json::Value;
 const JB_MONO_BYTES: &[u8] = include_bytes!("../assets/fonts/ttf/JetBrainsMonoNL-Medium.ttf");
 
 pub fn main() -> iced::Result {
-    iced::application("Anoto PDF Generator", Gui::update, Gui::view)
+    iced::application(Gui::default, Gui::update, Gui::view)
+        .title("Anoto PDF Generator")
         .window_size((800.0, 600.0))
         .centered()
-        .scale_factor(|s| s.ui_scale as f64)
+        .scale_factor(|s| s.ui_scale)
+        .font(iced_aw::ICED_AW_FONT_BYTES)
         .font(JB_MONO_BYTES)
         .run()
 }
@@ -40,6 +47,7 @@ struct Gui {
     is_generating: bool,
     server_port: String,
     server_shutdown_tx: Option<oneshot::Sender<()>>,
+    server_thread: Option<std::thread::JoinHandle<()>>,
     server_status_text: String,
     server_rx: Option<Arc<Mutex<mpsc::Receiver<String>>>>,
     rest_post_content: text_editor::Content,
@@ -55,11 +63,12 @@ struct Gui {
     draw_status: String,
     current_png_path: Option<String>,
     preview_zoom: f32,
+    preview_pan: Vector,
     image_width: u32,
     image_height: u32,
-    scrollable_id: scrollable::Id,
     points_input: text_editor::Content,
     points_status: String,
+    seen_points: HashSet<(i64, i64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +96,7 @@ enum Message {
     ServerPortChanged(String),
     ToggleServer,
     ServerStarted(Result<(), String>),
+    ServerStopped,
     RestPostReceived(Option<String>),
     RestPostContentChanged(text_editor::Action),
     JsonInputChanged(text_editor::Action),
@@ -101,8 +111,8 @@ enum Message {
     DrawYChanged(String),
     DrawDotPressed,
     DrawDotFinished(Result<image::Handle, String>),
-    PreviewZoomed(f32, Point),
-    PreviewPanned(Vector),
+    PreviewZoomed(f32, Point, (f32, f32)),
+    PreviewPanned(Vector, (f32, f32)),
     PointsInputChanged(text_editor::Action),
     PlotAllPoints,
     PlotAllPointsFinished(Result<image::Handle, String>),
@@ -126,6 +136,7 @@ impl Default for Gui {
             is_generating: false,
             server_port: "8080".to_string(),
             server_shutdown_tx: None,
+            server_thread: None,
             server_status_text: "Server Stopped".to_string(),
             server_rx: None,
             rest_post_content: text_editor::Content::new(),
@@ -141,11 +152,12 @@ impl Default for Gui {
             draw_status: "Ready".to_string(),
             current_png_path: None,
             preview_zoom: 1.0,
+            preview_pan: Vector::new(0.0, 0.0),
             image_width: 0,
             image_height: 0,
-            scrollable_id: scrollable::Id::unique(),
             points_input: text_editor::Content::new(),
             points_status: "Ready".to_string(),
+            seen_points: HashSet::new(),
         }
     }
 }
@@ -159,22 +171,17 @@ struct GenerationParams {
     config: PdfConfig,
 }
 
+#[derive(Default)]
 struct ImageViewerState {
     is_dragging: bool,
     last_cursor_pos: Option<Point>,
 }
 
-impl Default for ImageViewerState {
-    fn default() -> Self {
-        Self {
-            is_dragging: false,
-            last_cursor_pos: None,
-        }
-    }
-}
-
 struct ImageViewer<'a> {
     handle: &'a image::Handle,
+    zoom: f32,
+    pan: Vector,
+    image_size: (f32, f32),
 }
 
 impl<'a> canvas::Program<Message> for ImageViewer<'a> {
@@ -183,53 +190,61 @@ impl<'a> canvas::Program<Message> for ImageViewer<'a> {
     fn update(
         &self,
         state: &mut Self::State,
-        event: canvas::Event,
+        event: &iced::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> (event::Status, Option<Message>) {
+    ) -> Option<Action<Message>> {
         match event {
-            canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let delta_y = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => y,
-                    mouse::ScrollDelta::Pixels { y, .. } => y / 20.0,
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / 20.0,
                 };
-                if let Some(p) = cursor.position_in(bounds) {
-                    (event::Status::Captured, Some(Message::PreviewZoomed(delta_y, p)))
-                } else {
-                    (event::Status::Ignored, None)
-                }
+                cursor.position_in(bounds).map(|p| {
+                    Action::publish(Message::PreviewZoomed(
+                        delta_y,
+                        p,
+                        (bounds.width, bounds.height),
+                    ))
+                    .and_capture()
+                })
             }
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if let Some(_) = cursor.position_in(bounds) {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if cursor.position_in(bounds).is_some() {
                     state.is_dragging = true;
                     state.last_cursor_pos = cursor.position();
-                    (event::Status::Captured, None)
+                    Some(Action::capture())
                 } else {
-                    (event::Status::Ignored, None)
+                    None
                 }
             }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if state.is_dragging {
                     state.is_dragging = false;
                     state.last_cursor_pos = None;
-                    (event::Status::Captured, None)
+                    Some(Action::capture())
                 } else {
-                    (event::Status::Ignored, None)
+                    None
                 }
             }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                if state.is_dragging {
-                    if let Some(current_pos) = cursor.position() {
-                        if let Some(last_pos) = state.last_cursor_pos {
-                            let delta = current_pos - last_pos;
-                            state.last_cursor_pos = Some(current_pos);
-                            return (event::Status::Captured, Some(Message::PreviewPanned(delta)));
-                        }
-                    }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if state.is_dragging
+                    && let Some(current_pos) = cursor.position()
+                    && let Some(last_pos) = state.last_cursor_pos
+                {
+                    let delta = current_pos - last_pos;
+                    state.last_cursor_pos = Some(current_pos);
+                    return Some(
+                        Action::publish(Message::PreviewPanned(
+                            delta,
+                            (bounds.width, bounds.height),
+                        ))
+                        .and_capture(),
+                    );
                 }
-                (event::Status::Ignored, None)
+                None
             }
-            _ => (event::Status::Ignored, None),
+            _ => None,
         }
     }
 
@@ -242,53 +257,107 @@ impl<'a> canvas::Program<Message> for ImageViewer<'a> {
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        
-        frame.draw_image(
-            bounds,
-            canvas::Image::new(self.handle.clone())
-        );
-        
+
+        let (img_w, img_h) = self.image_size;
+        let w = img_w * self.zoom;
+        let h = img_h * self.zoom;
+        let dest = Rectangle {
+            x: self.pan.x,
+            y: self.pan.y,
+            width: w,
+            height: h,
+        };
+
+        frame.draw_image(dest, canvas::Image::new(self.handle.clone()));
+
         vec![frame.into_geometry()]
     }
 }
 
 impl Gui {
+    fn clamp_pan_for_viewport(&mut self, viewport: (f32, f32)) {
+        let (vw, vh) = viewport;
+        if vw <= 0.0 || vh <= 0.0 || self.image_width == 0 || self.image_height == 0 {
+            return;
+        }
+
+        let img_w = self.image_width as f32 * self.preview_zoom;
+        let img_h = self.image_height as f32 * self.preview_zoom;
+
+        let pan_x = if img_w <= vw {
+            (vw - img_w) * 0.5
+        } else {
+            self.preview_pan.x.clamp(vw - img_w, 0.0)
+        };
+
+        let pan_y = if img_h <= vh {
+            (vh - img_h) * 0.5
+        } else {
+            self.preview_pan.y.clamp(vh - img_h, 0.0)
+        };
+
+        self.preview_pan = Vector::new(pan_x, pan_y);
+    }
+
+    fn zoom_at(&mut self, delta: f32, cursor: Point, viewport: (f32, f32)) {
+        let old_zoom = self.preview_zoom;
+        let new_zoom = (old_zoom * (1.0 + delta * 0.1)).clamp(0.1, 20.0);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            return;
+        }
+
+        // Keep the point under the cursor stable while zooming.
+        let cursor_v = Vector::new(cursor.x, cursor.y);
+        let world = (cursor_v - self.preview_pan) * (1.0 / old_zoom);
+        self.preview_zoom = new_zoom;
+        self.preview_pan = cursor_v - world * new_zoom;
+
+        self.clamp_pan_for_viewport(viewport);
+    }
+
+    fn pan_by(&mut self, delta: Vector, viewport: (f32, f32)) {
+        self.preview_pan += delta;
+        self.clamp_pan_for_viewport(viewport);
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::UiScaleChanged(val) => self.ui_scale = val,
             Message::DpiChanged(val) => self.config.dpi = val,
             Message::DotSizeChanged(val) => self.config.dot_size = (val * 10.0).round() / 10.0,
-            Message::OffsetChanged(val) => self.config.offset_from_origin = (val * 10.0).round() / 10.0,
+            Message::OffsetChanged(val) => {
+                self.config.offset_from_origin = (val * 10.0).round() / 10.0
+            }
             Message::SpacingChanged(val) => {
                 self.config.grid_spacing = (val * 10.0).round() / 10.0;
                 if self.page_layout_state.autodetect {
                     self.recalculate_layout();
                 }
-            },
+            }
             Message::HeightChanged(val) => {
                 if !self.page_layout_state.autodetect {
                     self.height = val;
                 }
-            },
+            }
             Message::WidthChanged(val) => {
                 if !self.page_layout_state.autodetect {
                     self.width = val;
                 }
-            },
+            }
             Message::AutodetectChanged(val) => {
                 self.page_layout_state.autodetect = val;
                 if val {
                     self.recalculate_layout();
                 }
-            },
+            }
             Message::SectUChanged(val) => {
                 self.sect_u = val;
                 self.sect_u_str = val.to_string();
-            },
+            }
             Message::SectVChanged(val) => {
                 self.sect_v = val;
                 self.sect_v_str = val.to_string();
-            },
+            }
             Message::ToggleUpPicker(show) => self.control_state.show_up = show,
             Message::ToggleDownPicker(show) => self.control_state.show_down = show,
             Message::ToggleLeftPicker(show) => self.control_state.show_left = show,
@@ -296,19 +365,19 @@ impl Gui {
             Message::ColorUpPicked(color) => {
                 self.config.color_up = color_to_hex(color);
                 self.control_state.show_up = false;
-            },
+            }
             Message::ColorDownPicked(color) => {
                 self.config.color_down = color_to_hex(color);
                 self.control_state.show_down = false;
-            },
+            }
             Message::ColorLeftPicked(color) => {
                 self.config.color_left = color_to_hex(color);
                 self.control_state.show_left = false;
-            },
+            }
             Message::ColorRightPicked(color) => {
                 self.config.color_right = color_to_hex(color);
                 self.control_state.show_right = false;
-            },
+            }
             Message::ServerPortChanged(port) => {
                 if port.chars().all(|c| c.is_numeric()) {
                     self.server_port = port;
@@ -320,36 +389,120 @@ impl Gui {
                     if let Some(tx) = self.server_shutdown_tx.take() {
                         let _ = tx.send(());
                     }
-                    self.server_status_text = "Server Stopped".to_string();
                     self.server_rx = None;
+                    self.server_status_text = "Stopping Server...".to_string();
+
+                    let join_handle = self.server_thread.take();
+                    return Task::perform(
+                        async move {
+                            if let Some(handle) = join_handle {
+                                let _ = handle.join();
+                            }
+                        },
+                        |_| Message::ServerStopped,
+                    );
                 } else {
                     // Start server
                     let port_str = self.server_port.clone();
+
+                    let port = match port_str.parse::<u16>() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            self.server_status_text = "Error: Invalid port".to_string();
+                            return Task::none();
+                        }
+                    };
+
+                    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
                     let (tx, rx) = oneshot::channel();
                     let (msg_tx, msg_rx) = mpsc::channel(100);
+
+                    let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
+
                     self.server_shutdown_tx = Some(tx);
                     let rx_arc = Arc::new(Mutex::new(msg_rx));
                     self.server_rx = Some(rx_arc.clone());
                     self.server_status_text = "Starting Server...".to_string();
 
+                    let handle = std::thread::spawn(move || {
+                        let rt = match tokio::runtime::Builder::new_multi_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(rt) => rt,
+                            Err(e) => {
+                                let _ = startup_tx
+                                    .send(Err(format!("Failed to create Tokio runtime: {}", e)));
+                                return;
+                            }
+                        };
+
+                        rt.block_on(async move {
+                            let listener = match tokio::net::TcpListener::bind(addr).await {
+                                Ok(l) => {
+                                    let _ = startup_tx.send(Ok(()));
+                                    l
+                                }
+                                Err(e) => {
+                                    let _ = startup_tx.send(Err(e.to_string()));
+                                    return;
+                                }
+                            };
+
+                            let app = axum::Router::new()
+                                .route("/", axum::routing::get(index_handler))
+                                .route("/decode", axum::routing::post(decode_handler))
+                                .layer(axum::Extension(msg_tx));
+
+                            if let Err(e) = axum::serve(listener, app)
+                                .with_graceful_shutdown(async {
+                                    rx.await.ok();
+                                })
+                                .await
+                            {
+                                eprintln!("Server error: {}", e);
+                            }
+                        });
+                    });
+
+                    self.server_thread = Some(handle);
+
                     return Task::batch(vec![
-                        Task::perform(async move {
-                            start_server_task(port_str, rx, msg_tx).await
-                        }, Message::ServerStarted),
-                        listen_for_post(rx_arc)
+                        Task::perform(
+                            async move {
+                                match startup_rx.await {
+                                    Ok(r) => r,
+                                    Err(_) => {
+                                        Err("Server startup channel closed unexpectedly"
+                                            .to_string())
+                                    }
+                                }
+                            },
+                            Message::ServerStarted,
+                        ),
+                        listen_for_post(rx_arc),
                     ]);
                 }
             }
+            Message::ServerStopped => {
+                self.server_status_text = "Server Stopped".to_string();
+            }
             Message::RestPostReceived(content) => {
+                // If the server isn't running anymore, ignore any late/queued messages.
+                if self.server_shutdown_tx.is_none() {
+                    return Task::none();
+                }
                 if let Some(c) = content {
                     let clean_c = c.trim();
                     let json_candidate = if clean_c.starts_with('\'') && clean_c.ends_with('\'') {
-                        &clean_c[1..clean_c.len()-1]
+                        &clean_c[1..clean_c.len() - 1]
                     } else {
                         clean_c
                     };
 
-                    let formatted_content = if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
+                    let formatted_content = if let Ok(val) =
+                        serde_json::from_str::<serde_json::Value>(json_candidate)
+                    {
                         if let Some(arr) = val.as_array() {
                             // Check if it's a 2D array
                             if arr.iter().all(|item| item.is_array()) {
@@ -360,20 +513,22 @@ impl Gui {
                                     if i < arr.len() - 1 {
                                         s.push_str(",\n");
                                     } else {
-                                        s.push_str("\n");
+                                        s.push('\n');
                                     }
                                 }
-                                s.push_str("]");
+                                s.push(']');
                                 s
                             } else {
-                                serde_json::to_string_pretty(&val).unwrap_or(json_candidate.to_string())
+                                serde_json::to_string_pretty(&val)
+                                    .unwrap_or(json_candidate.to_string())
                             }
                         } else {
                             serde_json::to_string_pretty(&val).unwrap_or(json_candidate.to_string())
                         }
                     } else {
                         // Fallback heuristic formatting for when JSON parsing fails (e.g. missing quotes)
-                        json_candidate.to_string()
+                        json_candidate
+                            .to_string()
                             .replace("],", "],\n  ")
                             .replace("], ", "],\n  ")
                             .replace("[[", "[\n  [")
@@ -383,24 +538,29 @@ impl Gui {
 
                     // Attempt to decode and add to points list
                     let decode_res = decode_json_input(json_candidate);
-                    
-                    if decode_res.contains("Position: ") {
-                        println!("Decode success");
-                        let clean_coords = decode_res.lines()
-                            .filter(|l| l.starts_with("Position: "))
-                            .map(|l| l.trim_start_matches("Position: ").trim())
-                            .collect::<Vec<&str>>()
-                            .join("\n");
 
-                        if !clean_coords.is_empty() {
+                    let positions = extract_positions_from_decode_output(&decode_res);
+                    if !positions.is_empty() {
+                        let mut new_lines: Vec<String> = Vec::new();
+                        for (x, y) in positions {
+                            if self.seen_points.insert((x, y)) {
+                                new_lines.push(format!("({}, {})", x, y));
+                            }
+                        }
+
+                        if !new_lines.is_empty() {
                             let current_text = self.points_input.text();
+                            let appended = new_lines.join("\n");
                             let new_text = if current_text.is_empty() {
-                                clean_coords
+                                appended
                             } else {
-                                format!("{}\n{}", current_text, clean_coords)
+                                format!("{}\n{}", current_text, appended)
                             };
                             self.points_input = text_editor::Content::with_text(&new_text);
-                            self.points_status = "Decoded successfully".to_string();
+                            self.points_status =
+                                format!("Decoded {} new point(s)", new_lines.len());
+                        } else {
+                            self.points_status = "Decoded (no new points)".to_string();
                         }
                     } else {
                         println!("Decode failed: {}", decode_res);
@@ -416,17 +576,17 @@ impl Gui {
             Message::RestPostContentChanged(action) => {
                 self.rest_post_content.perform(action);
             }
-            Message::ServerStarted(result) => {
-                match result {
-                    Ok(_) => {
-                        self.server_status_text = "Server Running".to_string();
-                    }
-                    Err(e) => {
-                        self.server_status_text = format!("Error: {}", e);
-                        self.server_shutdown_tx = None;
-                    }
+            Message::ServerStarted(result) => match result {
+                Ok(_) => {
+                    self.server_status_text = "Server Running".to_string();
                 }
-            }
+                Err(e) => {
+                    self.server_status_text = format!("Error: {}", e);
+                    self.server_shutdown_tx = None;
+                    self.server_rx = None;
+                    self.server_thread = None;
+                }
+            },
             Message::JsonInputChanged(action) => {
                 self.json_input.perform(action);
             }
@@ -457,7 +617,12 @@ impl Gui {
                 self.lookup_result.perform(action);
             }
             Message::PerformLookup => {
-                let res = perform_pattern_lookup(&self.lookup_sect_u, &self.lookup_sect_v, &self.lookup_x, &self.lookup_y);
+                let res = perform_pattern_lookup(
+                    &self.lookup_sect_u,
+                    &self.lookup_sect_v,
+                    &self.lookup_x,
+                    &self.lookup_y,
+                );
                 self.lookup_result = text_editor::Content::with_text(&res);
             }
             Message::GeneratePressed => {
@@ -471,11 +636,12 @@ impl Gui {
                         sect_v: self.sect_v,
                         config: self.config.clone(),
                     };
-                    return Task::perform(async move {
-                        generate_and_save(params).await
-                    }, Message::GenerationFinished);
+                    return Task::perform(
+                        async move { generate_and_save(params).await },
+                        Message::GenerationFinished,
+                    );
                 }
-            },
+            }
             Message::GenerationFinished(result) => {
                 self.is_generating = false;
                 match result {
@@ -486,6 +652,7 @@ impl Gui {
                         self.image_width = w;
                         self.image_height = h;
                         self.preview_zoom = 1.0;
+                        self.preview_pan = Vector::new(0.0, 0.0);
                     }
                     Err(e) => self.status_message = format!("Error: {}", e),
                 }
@@ -508,105 +675,133 @@ impl Gui {
                     let matrix_width = self.width;
                     let matrix_height = self.height;
                     let path_clone = path.clone();
-                    
+
                     self.draw_status = "Drawing dot...".to_string();
 
-                    return Task::perform(async move {
-                        match draw_dot_on_file(&path_clone, x, y, matrix_height, matrix_width, &config) {
-                            Ok(_) => {
-                                // Reload the image
-                                 match std::fs::read(&path_clone) {
-                                    Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
-                                    Err(e) => Err(e.to_string())
-                                 }
-                            },
-                            Err(e) => Err(e.to_string())
-                        }
-                    }, Message::DrawDotFinished);
+                    return Task::perform(
+                        async move {
+                            match draw_dot_on_file(
+                                &path_clone,
+                                x,
+                                y,
+                                matrix_height,
+                                matrix_width,
+                                &config,
+                            ) {
+                                Ok(_) => {
+                                    // Reload the image
+                                    match std::fs::read(&path_clone) {
+                                        Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        },
+                        Message::DrawDotFinished,
+                    );
                 } else {
                     self.draw_status = "Generate PDF first!".to_string();
                 }
             }
-            Message::DrawDotFinished(result) => {
-                match result {
-                    Ok(handle) => {
-                        self.draw_status = "Dot drawn!".to_string();
-                        self.generated_image_handle = Some(handle);
-                    }
-                    Err(e) => self.draw_status = format!("Error: {}", e),
+            Message::DrawDotFinished(result) => match result {
+                Ok(handle) => {
+                    self.draw_status = "Dot drawn!".to_string();
+                    self.generated_image_handle = Some(handle);
                 }
-            }
+                Err(e) => self.draw_status = format!("Error: {}", e),
+            },
             Message::PointsInputChanged(action) => {
                 self.points_input.perform(action);
+
+                // Keep the dedupe set consistent with what's currently in the editor.
+                // This prevents a mismatch where the user clears/edits the box but we still
+                // treat old points as "seen".
+                self.seen_points.clear();
+                for (x, y) in parse_points(&self.points_input.text()) {
+                    let rx = x.round();
+                    let ry = y.round();
+                    if (x - rx).abs() < 1e-9 && (y - ry).abs() < 1e-9 {
+                        self.seen_points.insert((rx as i64, ry as i64));
+                    }
+                }
             }
             Message::PlotAllPoints => {
                 if let Some(path) = &self.current_png_path {
                     let text = self.points_input.text();
-                    let points = parse_points(&text);
+                    let mut points = parse_points(&text);
+
+                    // If the text isn't (x,y) points, try decoding it as Anoto JSON (arrows/binary)
+                    if points.is_empty() {
+                        let decoded = decode_json_input(&text);
+                        points = decoded
+                            .lines()
+                            .filter_map(|l| {
+                                let l = l.trim();
+                                if !l.starts_with("Position: (") {
+                                    return None;
+                                }
+                                let coords = l.trim_start_matches("Position: ").trim();
+                                parse_points(coords).into_iter().next()
+                            })
+                            .collect();
+                    }
                     if points.is_empty() {
                         self.points_status = "No valid points found".to_string();
                     } else {
+                        // Deduplicate points before plotting
+                        let mut seen: HashSet<(u64, u64)> = HashSet::new();
+                        points.retain(|(x, y)| {
+                            // Deduplicate exact float values without truncation.
+                            // This keeps distinct points distinct even if they share the same integer part.
+                            seen.insert((x.to_bits(), y.to_bits()))
+                        });
+
                         let config = self.config.clone();
                         let matrix_width = self.width;
                         let matrix_height = self.height;
                         let path_clone = path.clone();
-                        
+
                         self.points_status = format!("Plotting {} points...", points.len());
 
-                        return Task::perform(async move {
-                            match draw_dots_on_file(&path_clone, &points, matrix_height, matrix_width, &config) {
-                                Ok(_) => {
-                                    // Reload the image
-                                     match std::fs::read(&path_clone) {
-                                        Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
-                                        Err(e) => Err(e.to_string())
-                                     }
-                                },
-                                Err(e) => Err(e.to_string())
-                            }
-                        }, Message::PlotAllPointsFinished);
+                        return Task::perform(
+                            async move {
+                                match draw_dots_on_file(
+                                    &path_clone,
+                                    &points,
+                                    matrix_height,
+                                    matrix_width,
+                                    &config,
+                                ) {
+                                    Ok(_) => {
+                                        // Reload the image
+                                        match std::fs::read(&path_clone) {
+                                            Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
+                                            Err(e) => Err(e.to_string()),
+                                        }
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            },
+                            Message::PlotAllPointsFinished,
+                        );
                     }
                 } else {
                     self.points_status = "Generate PDF first!".to_string();
                 }
             }
-            Message::PlotAllPointsFinished(result) => {
-                match result {
-                    Ok(handle) => {
-                        self.points_status = "Points plotted!".to_string();
-                        self.generated_image_handle = Some(handle);
-                    }
-                    Err(e) => self.points_status = format!("Error: {}", e),
+            Message::PlotAllPointsFinished(result) => match result {
+                Ok(handle) => {
+                    self.points_status = "Points plotted!".to_string();
+                    self.generated_image_handle = Some(handle);
                 }
+                Err(e) => self.points_status = format!("Error: {}", e),
+            },
+            Message::PreviewZoomed(delta, cursor, viewport) => {
+                self.zoom_at(delta, cursor, viewport);
             }
-            Message::PreviewZoomed(delta, cursor) => {
-                let old_zoom = self.preview_zoom;
-                let new_zoom = (old_zoom * (1.0 + delta * 0.1)).max(0.1).min(20.0);
-                
-                // cursor is relative to the canvas (which is scaled)
-                // We want to scroll such that the point under cursor remains under cursor.
-                // p_old = cursor
-                // p_unscaled = p_old / old_zoom
-                // p_new = p_unscaled * new_zoom
-                // delta_scroll = p_new - p_old
-                
-                let p_old = Vector::new(cursor.x, cursor.y);
-                let p_unscaled = p_old * (1.0 / old_zoom);
-                let p_new = p_unscaled * new_zoom;
-                let delta_scroll = p_new - p_old;
-                
-                self.preview_zoom = new_zoom;
-                
-                return scrollable::scroll_by(
-                    self.scrollable_id.clone(),
-                    scrollable::AbsoluteOffset { x: delta_scroll.x, y: delta_scroll.y }
-                );
-            }
-            Message::PreviewPanned(delta) => {
-                return scrollable::scroll_by(
-                    self.scrollable_id.clone(),
-                    scrollable::AbsoluteOffset { x: -delta.x, y: -delta.y }
-                );
+            Message::PreviewPanned(delta, viewport) => {
+                self.pan_by(delta, viewport);
             }
         }
         Task::none()
@@ -624,10 +819,13 @@ impl Gui {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let scale_slider = container(column![
-            text(format!("UI Scale: {:.1}", self.ui_scale)),
-            slider(0.5..=3.0, self.ui_scale, Message::UiScaleChanged).step(0.1)
-        ].spacing(10))
+        let scale_slider = container(
+            column![
+                text(format!("UI Scale: {:.1}", self.ui_scale)),
+                slider(0.5..=3.0, self.ui_scale, Message::UiScaleChanged).step(0.1)
+            ]
+            .spacing(10),
+        )
         .padding(10)
         .style(|_theme| container::Style {
             border: Border {
@@ -638,10 +836,13 @@ impl Gui {
             ..container::Style::default()
         });
 
-        let dpi_slider = container(column![
-            text(format!("PDF DPI: {:.0}", self.config.dpi)),
-            slider(300.0..=1200.0, self.config.dpi, Message::DpiChanged).step(10.0)
-        ].spacing(10))
+        let dpi_slider = container(
+            column![
+                text(format!("PDF DPI: {:.0}", self.config.dpi)),
+                slider(300.0..=1200.0, self.config.dpi, Message::DpiChanged).step(10.0)
+            ]
+            .spacing(10),
+        )
         .padding(10)
         .style(|_theme| container::Style {
             border: Border {
@@ -690,36 +891,38 @@ impl Gui {
             Message::SectVChanged,
         );
 
-        let matrix_inputs = column![
-            text("Matrix Settings:"),
-            page_layout,
-            section_ctrl,
-        ].spacing(10);
+        let matrix_inputs =
+            column![text("Matrix Settings:"), page_layout, section_ctrl,].spacing(10);
 
         let generate_btn = if self.is_generating {
             row![
                 button("Generating...").width(Length::Fill),
-                Spinner::new().width(Length::Fixed(20.0)).height(Length::Fixed(20.0)),
-            ].spacing(10)
+                Spinner::new()
+                    .width(Length::Fixed(20.0))
+                    .height(Length::Fixed(20.0)),
+            ]
+            .spacing(10)
         } else {
             row![
-                button("Generate PDF").on_press(Message::GeneratePressed).width(Length::Fill)
+                button("Generate PDF")
+                    .on_press(Message::GeneratePressed)
+                    .width(Length::Fill)
             ]
         };
 
         let controls = column![
             text("Anoto PDF Generator").size(30),
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             scale_slider,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             dpi_slider,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             anoto_ctrl,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             matrix_inputs,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             generate_btn,
-            vertical_space().height(10),
+            space().height(Length::Fixed(10.0)),
             text(&self.status_message),
         ]
         .spacing(10)
@@ -727,22 +930,16 @@ impl Gui {
         .width(Length::Fixed(460.0));
 
         let image_preview = if let Some(handle) = &self.generated_image_handle {
-             container(
+            container(
                 container(
-                    scrollable(
-                        canvas::Canvas::new(ImageViewer {
-                            handle,
-                        })
-                        .width(Length::Fixed(self.image_width as f32 * self.preview_zoom))
-                        .height(Length::Fixed(self.image_height as f32 * self.preview_zoom))
-                    )
-                    .id(self.scrollable_id.clone())
-                    .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::default(),
-                        horizontal: scrollable::Scrollbar::default(),
+                    canvas::Canvas::new(ImageViewer {
+                        handle,
+                        zoom: self.preview_zoom,
+                        pan: self.preview_pan,
+                        image_size: (self.image_width as f32, self.image_height as f32),
                     })
                     .width(Length::Fill)
-                    .height(Length::Fill)
+                    .height(Length::Fill),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -760,7 +957,7 @@ impl Gui {
                         blur_radius: 10.0,
                     },
                     ..container::Style::default()
-                })
+                }),
             )
             .width(Length::Fill)
             .height(Length::Fill)
@@ -775,25 +972,39 @@ impl Gui {
                 .center_y(Length::Fill)
         };
 
-        let server_controls = container(column![
-            text("Web Server").size(20),
-            vertical_space().height(10),
-            row![
-                text("Port: "),
-                text_input("8080", &self.server_port)
-                    .on_input(Message::ServerPortChanged)
-                    .padding(5)
-                    .width(Length::Fixed(80.0))
-            ].spacing(10).align_y(iced::Alignment::Center),
-            vertical_space().height(10),
-            button(if self.server_shutdown_tx.is_some() { "Stop Server" } else { "Start Server" })
+        let server_controls = container(
+            column![
+                text("Web Server").size(20),
+                space().height(Length::Fixed(10.0)),
+                row![
+                    text("Port: "),
+                    text_input("8080", &self.server_port)
+                        .on_input(Message::ServerPortChanged)
+                        .padding(5)
+                        .width(Length::Fixed(80.0))
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                space().height(Length::Fixed(10.0)),
+                button(if self.server_shutdown_tx.is_some() {
+                    "Stop Server"
+                } else {
+                    "Start Server"
+                })
                 .on_press(Message::ToggleServer)
                 .padding(10)
                 .width(Length::Fill),
-            vertical_space().height(10),
-            text(&self.server_status_text).size(14).color(if self.server_shutdown_tx.is_some() { Color::from_rgb(0.0, 0.8, 0.0) } else { Color::from_rgb(0.8, 0.0, 0.0) }),
-        ]
-        .spacing(10))
+                space().height(Length::Fixed(10.0)),
+                text(&self.server_status_text).size(14).color(
+                    if self.server_shutdown_tx.is_some() {
+                        Color::from_rgb(0.0, 0.8, 0.0)
+                    } else {
+                        Color::from_rgb(0.8, 0.0, 0.0)
+                    }
+                ),
+            ]
+            .spacing(10),
+        )
         .padding(20)
         .style(|_theme| container::Style {
             border: Border {
@@ -805,23 +1016,25 @@ impl Gui {
         })
         .width(Length::Fixed(200.0));
 
-        let decoder_controls = container(column![
-            text("Decoder").size(20),
-            vertical_space().height(10),
-            text_editor(&self.json_input)
-                .on_action(Message::JsonInputChanged)
-                .height(Length::Fixed(200.0))
-                .font(iced::font::Font::MONOSPACE)
-                .wrapping(iced::widget::text::Wrapping::None),
-            vertical_space().height(10),
-            button("Decode Position")
-                .on_press(Message::DecodeJson)
-                .padding(10)
-                .width(Length::Fill),
-            vertical_space().height(10),
-            text(&self.decoded_result).size(14),
-        ]
-        .spacing(10))
+        let decoder_controls = container(
+            column![
+                text("Decoder").size(20),
+                space().height(Length::Fixed(10.0)),
+                text_editor(&self.json_input)
+                    .on_action(Message::JsonInputChanged)
+                    .height(Length::Fixed(200.0))
+                    .font(iced::font::Font::MONOSPACE)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                space().height(Length::Fixed(10.0)),
+                button("Decode Position")
+                    .on_press(Message::DecodeJson)
+                    .padding(10)
+                    .width(Length::Fill),
+                space().height(Length::Fixed(10.0)),
+                text(&self.decoded_result).size(14),
+            ]
+            .spacing(10),
+        )
         .padding(20)
         .style(|_theme| container::Style {
             border: Border {
@@ -833,42 +1046,66 @@ impl Gui {
         })
         .width(Length::Fixed(200.0));
 
-        let lookup_controls = container(column![
-            text("Pattern Lookup").size(20),
-            vertical_space().height(10),
-            row![
-                column![
-                    text("Sect U"),
-                    text_input("10", &self.lookup_sect_u).on_input(Message::LookupSectUChanged).padding(5).width(Length::Fill)
-                ].spacing(5).width(Length::Fill),
-                column![
-                    text("Sect V"),
-                    text_input("10", &self.lookup_sect_v).on_input(Message::LookupSectVChanged).padding(5).width(Length::Fill)
-                ].spacing(5).width(Length::Fill)
-            ].spacing(10),
-            row![
-                column![
-                    text("X"),
-                    text_input("0", &self.lookup_x).on_input(Message::LookupXChanged).padding(5).width(Length::Fill)
-                ].spacing(5).width(Length::Fill),
-                column![
-                    text("Y"),
-                    text_input("0", &self.lookup_y).on_input(Message::LookupYChanged).padding(5).width(Length::Fill)
-                ].spacing(5).width(Length::Fill)
-            ].spacing(10),
-            vertical_space().height(10),
-            button("Lookup Pattern")
-                .on_press(Message::PerformLookup)
-                .padding(10)
-                .width(Length::Fill),
-            vertical_space().height(10),
-            text_editor(&self.lookup_result)
-                .on_action(Message::LookupResultChanged)
-                .height(Length::Fixed(200.0))
-                .font(iced::font::Font::MONOSPACE)
-                .wrapping(iced::widget::text::Wrapping::None),
-        ]
-        .spacing(10))
+        let lookup_controls = container(
+            column![
+                text("Pattern Lookup").size(20),
+                space().height(Length::Fixed(10.0)),
+                row![
+                    column![
+                        text("Sect U"),
+                        text_input("10", &self.lookup_sect_u)
+                            .on_input(Message::LookupSectUChanged)
+                            .padding(5)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
+                    column![
+                        text("Sect V"),
+                        text_input("10", &self.lookup_sect_v)
+                            .on_input(Message::LookupSectVChanged)
+                            .padding(5)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill)
+                ]
+                .spacing(10),
+                row![
+                    column![
+                        text("X"),
+                        text_input("0", &self.lookup_x)
+                            .on_input(Message::LookupXChanged)
+                            .padding(5)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
+                    column![
+                        text("Y"),
+                        text_input("0", &self.lookup_y)
+                            .on_input(Message::LookupYChanged)
+                            .padding(5)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill)
+                ]
+                .spacing(10),
+                space().height(Length::Fixed(10.0)),
+                button("Lookup Pattern")
+                    .on_press(Message::PerformLookup)
+                    .padding(10)
+                    .width(Length::Fill),
+                space().height(Length::Fixed(10.0)),
+                text_editor(&self.lookup_result)
+                    .on_action(Message::LookupResultChanged)
+                    .height(Length::Fixed(200.0))
+                    .font(iced::font::Font::MONOSPACE)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            ]
+            .spacing(10),
+        )
         .padding(20)
         .style(|_theme| container::Style {
             border: Border {
@@ -880,28 +1117,41 @@ impl Gui {
         })
         .width(Length::Fixed(200.0));
 
-        let draw_dot_controls = container(column![
-            text("Draw Dot").size(20),
-            vertical_space().height(10),
-            row![
-                column![
-                    text("Position X:"),
-                    text_input("0", &self.draw_x).on_input(Message::DrawXChanged).padding(5).width(Length::Fill)
-                ].spacing(5).width(Length::Fill),
-                column![
-                    text("Position Y:"),
-                    text_input("0", &self.draw_y).on_input(Message::DrawYChanged).padding(5).width(Length::Fill)
-                ].spacing(5).width(Length::Fill)
-            ].spacing(10),
-            vertical_space().height(10),
-            button("Draw Dot")
-                .on_press(Message::DrawDotPressed)
-                .padding(10)
-                .width(Length::Fill),
-            vertical_space().height(10),
-            text(&self.draw_status).size(14),
-        ]
-        .spacing(10))
+        let draw_dot_controls = container(
+            column![
+                text("Draw Dot").size(20),
+                space().height(Length::Fixed(10.0)),
+                row![
+                    column![
+                        text("Position X:"),
+                        text_input("0", &self.draw_x)
+                            .on_input(Message::DrawXChanged)
+                            .padding(5)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
+                    column![
+                        text("Position Y:"),
+                        text_input("0", &self.draw_y)
+                            .on_input(Message::DrawYChanged)
+                            .padding(5)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill)
+                ]
+                .spacing(10),
+                space().height(Length::Fixed(10.0)),
+                button("Draw Dot")
+                    .on_press(Message::DrawDotPressed)
+                    .padding(10)
+                    .width(Length::Fill),
+                space().height(Length::Fixed(10.0)),
+                text(&self.draw_status).size(14),
+            ]
+            .spacing(10),
+        )
         .padding(20)
         .style(|_theme| container::Style {
             border: Border {
@@ -913,29 +1163,31 @@ impl Gui {
         })
         .width(Length::Fixed(200.0));
 
-        let rest_post_controls = container(column![
-            text("JSON 6x6+ REST Listener").size(20),
-            vertical_space().height(10),
-            text_editor(&self.rest_post_content)
-                .on_action(Message::RestPostContentChanged)
-                .height(Length::Fixed(300.0))
-                .font(iced::font::Font::MONOSPACE)
-                .wrapping(iced::widget::text::Wrapping::None),
-            vertical_space().height(10),
-            text("Ready to decode").size(14),
-            vertical_space().height(20),
-            text("(X,Y) Decoder").size(20),
-            text_editor(&self.points_input)
-                .on_action(Message::PointsInputChanged)
-                .height(Length::Fixed(150.0))
-                .font(iced::font::Font::MONOSPACE),
-            button("Plot on A4")
-                .on_press(Message::PlotAllPoints)
-                .padding(10)
-                .width(Length::Fill),
-            text(&self.points_status).size(14),
-        ]
-        .spacing(10))
+        let rest_post_controls = container(
+            column![
+                text("JSON 6x6+ REST Listener").size(20),
+                space().height(Length::Fixed(10.0)),
+                text_editor(&self.rest_post_content)
+                    .on_action(Message::RestPostContentChanged)
+                    .height(Length::Fixed(300.0))
+                    .font(iced::font::Font::MONOSPACE)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                space().height(Length::Fixed(10.0)),
+                text("Ready to decode").size(14),
+                space().height(Length::Fixed(20.0)),
+                text("(X,Y) Decoder").size(20),
+                text_editor(&self.points_input)
+                    .on_action(Message::PointsInputChanged)
+                    .height(Length::Fixed(150.0))
+                    .font(iced::font::Font::MONOSPACE),
+                button("Plot on A4")
+                    .on_press(Message::PlotAllPoints)
+                    .padding(10)
+                    .width(Length::Fill),
+                text(&self.points_status).size(14),
+            ]
+            .spacing(10),
+        )
         .padding(20)
         .style(|_theme| container::Style {
             border: Border {
@@ -949,19 +1201,16 @@ impl Gui {
 
         let right_column = column![
             server_controls,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             decoder_controls,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             lookup_controls,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             draw_dot_controls
         ]
         .padding(20);
 
-        let new_column = column![
-            rest_post_controls
-        ]
-        .padding(20);
+        let new_column = column![rest_post_controls].padding(20);
 
         row![
             image_preview,
@@ -980,26 +1229,56 @@ fn parse_points(input: &str) -> Vec<(f64, f64)> {
     for part in parts {
         // Find the last opening parenthesis in this part
         if let Some(start) = part.rfind('(') {
-            let content = &part[start+1..];
+            let content = &part[start + 1..];
             // Split by comma
             if let Some(comma) = content.find(',') {
                 let x_str = &content[..comma].trim();
-                let y_str = &content[comma+1..].trim();
+                let y_str = &content[comma + 1..].trim();
                 if let (Ok(x), Ok(y)) = (x_str.parse::<f64>(), y_str.parse::<f64>()) {
                     points.push((x, y));
                 }
             } else {
                 // Maybe space separated?
                 let coords: Vec<&str> = content.split_whitespace().collect();
-                if coords.len() >= 2 {
-                     if let (Ok(x), Ok(y)) = (coords[0].parse::<f64>(), coords[1].parse::<f64>()) {
-                        points.push((x, y));
-                    }
+                if coords.len() >= 2
+                    && let (Ok(x), Ok(y)) = (coords[0].parse::<f64>(), coords[1].parse::<f64>())
+                {
+                    points.push((x, y));
                 }
             }
         }
     }
     points
+}
+
+fn extract_positions_from_decode_output(s: &str) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let line = line.trim();
+        if !line.starts_with("Position: (") {
+            continue;
+        }
+        let rest = line.trim_start_matches("Position: ").trim();
+        // rest should look like: (x, y)
+        let rest = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')'));
+        let Some(inner) = rest else {
+            continue;
+        };
+
+        let mut parts = inner.split(',');
+        let x = parts
+            .next()
+            .map(str::trim)
+            .and_then(|p| p.parse::<i64>().ok());
+        let y = parts
+            .next()
+            .map(str::trim)
+            .and_then(|p| p.parse::<i64>().ok());
+        if let (Some(x), Some(y)) = (x, y) {
+            out.push((x, y));
+        }
+    }
+    out
 }
 
 fn decode_json_input(input: &str) -> String {
@@ -1008,11 +1287,11 @@ fn decode_json_input(input: &str) -> String {
         Err(e) => return format!("JSON Parse Error: {}", e),
     };
 
-    // If parsed is a string, try to parse it as JSON again (handles cmd.exe sending "[[...]]")
-    if let Some(s) = parsed.as_str() {
-        if let Ok(v) = serde_json::from_str(s) {
-            parsed = v;
-        }
+    // If parsed is a string, try to parse it as JSON again (handles shells that quote JSON)
+    if let Some(s) = parsed.as_str()
+        && let Ok(v) = serde_json::from_str(s)
+    {
+        parsed = v;
     }
 
     // Helper to map direction to bits
@@ -1028,10 +1307,10 @@ fn decode_json_input(input: &str) -> String {
 
     let map_coords = |x: i64, y: i64| -> Option<(i8, i8)> {
         match (x, y) {
-            (0, 0) => Some((0, 0)), // Up
-            (1, 0) => Some((1, 0)), // Left
-            (0, 1) => Some((0, 1)), // Right
-            (1, 1) => Some((1, 1)), // Down
+            (0, 0) => Some((0, 0)),
+            (1, 0) => Some((1, 0)),
+            (0, 1) => Some((0, 1)),
+            (1, 1) => Some((1, 1)),
             _ => None,
         }
     };
@@ -1044,54 +1323,59 @@ fn decode_json_input(input: &str) -> String {
                 let y = cell_arr[1].as_i64();
                 if let (Some(x), Some(y)) = (x, y) {
                     return map_coords(x, y);
-                } else {
-                    // Maybe it's ["↑"]
-                    if let Some(s) = cell_arr[0].as_str() {
-                         return map_direction(s);
-                    }
                 }
-            } else if cell_arr.len() == 1 {
-                 // Case: ["↑"]
-                 if let Some(s) = cell_arr[0].as_str() {
-                     return map_direction(s);
-                 }
+
+                // Case: ["↑", ...] or ["Up", ...]
+                if let Some(s) = cell_arr[0].as_str() {
+                    return map_direction(s);
+                }
+            }
+
+            // Case: ["↑"] or ["Up"]
+            if cell_arr.len() == 1
+                && let Some(s) = cell_arr[0].as_str()
+            {
+                return map_direction(s);
             }
         } else if let Some(s) = cell.as_str() {
             // Case: "↑"
             return map_direction(s);
         }
+
         None
     };
 
-    // Find the matrix
+    // Find the matrix (allow arbitrary wrapping arrays until we reach a 2D array of cells)
     let mut matrix_val = &parsed;
     while let Some(arr) = matrix_val.as_array() {
-        if arr.is_empty() { return "Empty array".to_string(); }
-        
-        if let Some(first_row) = arr[0].as_array() {
-             if first_row.is_empty() { return "Empty row".to_string(); }
-             
-             let is_cell = |v: &Value| {
-                 if v.is_string() { true }
-                 else if let Some(a) = v.as_array() {
-                     // It's a cell if it's [num, num] or ["str"]
-                     // It's NOT a cell if it's [[...]] (array of arrays)
-                     !a.is_empty() && !a[0].is_array()
-                 } else {
-                     false
-                 }
-             };
-             
-             if is_cell(&first_row[0]) {
-                 // Found the matrix!
-                 break;
-             } else {
-                 // Go deeper
-                 matrix_val = &arr[0];
-             }
-        } else {
-            return "Invalid structure".to_string();
+        if arr.is_empty() {
+            return "Empty array".to_string();
         }
+
+        let Some(first_row) = arr[0].as_array() else {
+            return "Invalid structure".to_string();
+        };
+
+        if first_row.is_empty() {
+            return "Empty row".to_string();
+        }
+
+        let is_cell = |v: &Value| {
+            if v.is_string() {
+                true
+            } else if let Some(a) = v.as_array() {
+                // It's a cell if it's [num, num] or ["str"], but NOT if it's nested arrays
+                !a.is_empty() && !a[0].is_array()
+            } else {
+                false
+            }
+        };
+
+        if is_cell(&first_row[0]) {
+            break;
+        }
+
+        matrix_val = &arr[0];
     }
 
     let rows = match matrix_val.as_array() {
@@ -1099,155 +1383,163 @@ fn decode_json_input(input: &str) -> String {
         None => return "Could not find matrix array".to_string(),
     };
 
-    let mut grid = Vec::new();
+    let mut invalid_cells = 0usize;
+    let mut grid: Vec<Vec<Option<(i8, i8)>>> = Vec::new();
+
     for (r_idx, row_val) in rows.iter().enumerate() {
         let row_arr = match row_val.as_array() {
             Some(a) => a,
             None => return format!("Row {} is not an array", r_idx),
         };
-        let mut row_bits = Vec::new();
-        for (c_idx, cell_val) in row_arr.iter().enumerate() {
-            match map_cell(cell_val) {
-                Some(bits) => row_bits.push(bits),
-                None => return format!("Invalid cell at [{}, {}]", r_idx, c_idx),
+
+        let mut row_bits: Vec<Option<(i8, i8)>> = Vec::with_capacity(row_arr.len());
+        for cell_val in row_arr.iter() {
+            let bits = map_cell(cell_val);
+            if bits.is_none() {
+                invalid_cells += 1;
             }
+            row_bits.push(bits);
         }
         grid.push(row_bits);
     }
 
     let height = grid.len();
-    if height < 6 { return "Matrix too small (height < 6)".to_string(); }
+    if height < 6 {
+        return "Matrix too small (height < 6)".to_string();
+    }
     let width = grid[0].len();
-    if width < 6 { return "Matrix too small (width < 6)".to_string(); }
-
-    // Check all rows have same width
+    if width < 6 {
+        return "Matrix too small (width < 6)".to_string();
+    }
     if grid.iter().any(|r| r.len() != width) {
         return "Matrix rows have inconsistent lengths".to_string();
     }
 
-    let mut results = String::new();
     let codec = anoto_6x6_a4_fixed();
+    let mut seen: HashSet<(i64, i64)> = HashSet::new();
+    let mut decoded: Vec<(i64, i64)> = Vec::new();
+    let mut decode_errors = 0usize;
+
+    // Reuse the buffer to avoid allocating for every 6x6 window.
+    let mut bits = ndarray::Array3::<i8>::zeros((6, 6, 2));
 
     for r in 0..=(height - 6) {
         for c in 0..=(width - 6) {
-            // Extract 6x6
-            let mut bits = ndarray::Array3::<i8>::zeros((6, 6, 2));
+            let mut ok = true;
+
             for i in 0..6 {
                 for j in 0..6 {
-                    let (b0, b1) = grid[r+i][c+j];
-                    bits[[i, j, 0]] = b0;
-                    bits[[i, j, 1]] = b1;
+                    match grid[r + i][c + j] {
+                        Some((b0, b1)) => {
+                            bits[[i, j, 0]] = b0;
+                            bits[[i, j, 1]] = b1;
+                        }
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    break;
                 }
             }
 
-            if let Ok((x, y)) = codec.decode_position(&bits) {
-                if !results.is_empty() { results.push('\n'); }
-                results.push_str(&format!("Position: ({}, {})", x, y));
+            if !ok {
+                continue;
+            }
+
+            match codec.decode_position(&bits) {
+                Ok((x, y)) => {
+                    let x = x as i64;
+                    let y = y as i64;
+                    if seen.insert((x, y)) {
+                        decoded.push((x, y));
+                    }
+                }
+                Err(_) => {
+                    decode_errors += 1;
+                }
             }
         }
     }
 
-    if results.is_empty() {
-        "No valid positions found".to_string()
-    } else {
-        results
+    if decoded.is_empty() {
+        if invalid_cells > 0 {
+            return format!(
+                "No valid positions found (invalid cells: {})",
+                invalid_cells
+            );
+        }
+        if decode_errors > 0 {
+            return format!(
+                "No valid positions found (decode errors: {})",
+                decode_errors
+            );
+        }
+        return "No valid positions found".to_string();
     }
+
+    decoded
+        .into_iter()
+        .map(|(x, y)| format!("Position: ({}, {})", x, y))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn perform_pattern_lookup(sect_u_str: &str, sect_v_str: &str, x_str: &str, y_str: &str) -> String {
-    let sect_u = match sect_u_str.parse::<i32>() { Ok(v) => v, Err(_) => return "Invalid Sect U".to_string() };
-    let sect_v = match sect_v_str.parse::<i32>() { Ok(v) => v, Err(_) => return "Invalid Sect V".to_string() };
-    let x = match x_str.parse::<i32>() { Ok(v) => v, Err(_) => return "Invalid X".to_string() };
-    let y = match y_str.parse::<i32>() { Ok(v) => v, Err(_) => return "Invalid Y".to_string() };
+    let sect_u = match sect_u_str.parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => return "Invalid Sect U".to_string(),
+    };
+    let sect_v = match sect_v_str.parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => return "Invalid Sect V".to_string(),
+    };
+    let x = match x_str.parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => return "Invalid X".to_string(),
+    };
+    let y = match y_str.parse::<i32>() {
+        Ok(v) => v,
+        Err(_) => return "Invalid Y".to_string(),
+    };
 
     let codec = anoto_6x6_a4_fixed();
-    
-    let start_roll_x = sect_u % codec.mns_length as i32;
-    let start_roll_y = sect_v % codec.mns_length as i32;
-    
-    let bitmatrix = codec.encode_patch((x, y), (6, 6), (start_roll_x, start_roll_y));
-    
-    let mut result = String::new();
-    result.push_str("[\n");
+    let patch = codec.encode_patch((x, y), (6, 6), (sect_u, sect_v));
+
+    let mut arrows: Vec<Vec<&'static str>> = Vec::with_capacity(6);
+
     for r in 0..6 {
-        result.push_str("  [");
+        let mut row_arrows: Vec<&'static str> = Vec::with_capacity(6);
         for c in 0..6 {
-            let b0 = bitmatrix[[r, c, 0]];
-            let b1 = bitmatrix[[r, c, 1]];
+            let b0 = patch[[r, c, 0]];
+            let b1 = patch[[r, c, 1]];
             let arrow = match (b0, b1) {
-                (0, 0) => "\"↑\"",
-                (1, 0) => "\"←\"",
-                (0, 1) => "\"→\"",
-                (1, 1) => "\"↓\"",
-                _ => "\"?\"",
+                (0, 0) => "↑",
+                (1, 0) => "←",
+                (0, 1) => "→",
+                (1, 1) => "↓",
+                _ => "?",
             };
-            result.push_str(arrow);
-            if c < 5 { result.push_str(", "); }
+            row_arrows.push(arrow);
         }
-        result.push_str("]");
-        if r < 5 { result.push_str(",\n"); }
+        arrows.push(row_arrows);
     }
-    result.push_str("\n]");
-    
-    result
+
+    // Return pure JSON for easy copy/paste into the decoder.
+    serde_json::to_string_pretty(&arrows)
+        .unwrap_or_else(|e| format!("Failed to format arrows JSON: {}", e))
 }
 
 fn listen_for_post(rx: Arc<Mutex<mpsc::Receiver<String>>>) -> Task<Message> {
-    Task::perform(async move {
-        let mut lock = rx.lock().await;
-        lock.recv().await
-    }, Message::RestPostReceived)
-}
-
-async fn start_server_task(port_str: String, rx: oneshot::Receiver<()>, msg_tx: mpsc::Sender<String>) -> Result<(), String> {
-    let port = port_str.parse::<u16>().map_err(|_| "Invalid port")?;
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-
-    let (startup_tx, startup_rx) = oneshot::channel();
-
-    std::thread::spawn(move || {
-        // Create a dedicated Tokio runtime for the server
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build() 
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                let _ = startup_tx.send(Err(format!("Failed to create Tokio runtime: {}", e)));
-                return;
-            }
-        };
-
-        rt.block_on(async move {
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => {
-                    let _ = startup_tx.send(Ok(()));
-                    l
-                },
-                Err(e) => {
-                    let _ = startup_tx.send(Err(e.to_string()));
-                    return;
-                }
-            };
-
-            let app = axum::Router::new()
-                .route("/", axum::routing::get(index_handler))
-                .route("/decode", axum::routing::post(decode_handler))
-                .layer(axum::Extension(msg_tx));
-
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(async { rx.await.ok(); })
-                .await 
-            {
-                eprintln!("Server error: {}", e);
-            }
-        });
-    });
-
-    match startup_rx.await {
-        Ok(result) => result,
-        Err(_) => Err("Server startup channel closed unexpectedly".to_string()),
-    }
+    Task::perform(
+        async move {
+            let mut guard = rx.lock().await;
+            guard.recv().await
+        },
+        Message::RestPostReceived,
+    )
 }
 
 async fn index_handler() -> axum::response::Html<&'static str> {
@@ -1256,7 +1548,7 @@ async fn index_handler() -> axum::response::Html<&'static str> {
 
 async fn decode_handler(
     axum::Extension(msg_tx): axum::Extension<mpsc::Sender<String>>,
-    body: String
+    body: String,
 ) -> impl axum::response::IntoResponse {
     let _ = msg_tx.send(body).await;
     axum::http::StatusCode::OK
@@ -1335,32 +1627,66 @@ const INDEX_HTML: &str = r#"
 </html>
 "#;
 
-async fn generate_and_save(params: GenerationParams) -> Result<(image::Handle, String, u32, u32), String> {
+async fn generate_and_save(
+    params: GenerationParams,
+) -> Result<(image::Handle, String, u32, u32), String> {
     // This is a blocking operation, but we run it in an async block.
     // In a real async runtime, we should use spawn_blocking.
     // Since we don't have easy access to spawn_blocking without adding tokio dependency explicitly,
     // we will just run it here. It might block the UI thread if the executor is single threaded.
     // However, for the purpose of this task, we are using Task::perform.
-    
-    let result = (|| -> Result<(image::Handle, String, u32, u32), Box<dyn std::error::Error>> {
-        let bitmatrix = generate_matrix_only(params.height, params.width, params.sect_u, params.sect_v)?;
-        let base_filename = format!("GUI_G__{}__{}__{}__{}", params.height, params.width, params.sect_u, params.sect_v);
-        
-        // Generate PDF
-        gen_pdf_from_matrix_data(&bitmatrix, &format!("{}.pdf", base_filename), &params.config)?;
 
-        // Generate PNG
+    let result = (|| -> Result<(image::Handle, String, u32, u32), Box<dyn std::error::Error>> {
+        let bitmatrix =
+            generate_matrix_only(params.height, params.width, params.sect_u, params.sect_v)?;
+        let base_filename = format!(
+            "GUI_G__{}__{}__{}__{}",
+            params.height, params.width, params.sect_u, params.sect_v
+        );
+
         if !std::path::Path::new("output").exists() {
             std::fs::create_dir("output")?;
         }
-        let bitmatrix_i8 = bitmatrix.mapv(|x| x as i8);
-        let png_path = format!("output/{}__X.png", base_filename);
-        draw_preview_image(&bitmatrix_i8, &params.config, &png_path)?;
 
-        // Load image bytes to force refresh
-        let bytes = std::fs::read(&png_path)?;
+        // Generate X (normal) PDF/PNG
+        gen_pdf_from_matrix_data(
+            &bitmatrix,
+            &format!("{}__X.pdf", base_filename),
+            &params.config,
+        )?;
+        let bitmatrix_i8 = bitmatrix.mapv(|x| x as i8);
+        let png_path_x = format!("output/{}__X.png", base_filename);
+        draw_preview_image(&bitmatrix_i8, &params.config, &png_path_x)?;
+
+        // Generate Y (Y-axis flipped) PDF/PNG
+        let (h, w, d) = bitmatrix.dim();
+        let mut bitmatrix_y = bitmatrix.clone();
+        for y in 0..h {
+            for x in 0..w {
+                for k in 0..d {
+                    bitmatrix_y[[y, x, k]] = bitmatrix[[h - 1 - y, x, k]];
+                }
+            }
+        }
+
+        gen_pdf_from_matrix_data(
+            &bitmatrix_y,
+            &format!("{}__Y.pdf", base_filename),
+            &params.config,
+        )?;
+        let bitmatrix_y_i8 = bitmatrix_y.mapv(|x| x as i8);
+        let png_path_y = format!("output/{}__Y.png", base_filename);
+        draw_preview_image(&bitmatrix_y_i8, &params.config, &png_path_y)?;
+
+        // Load Y image bytes to force refresh in UI (Y is the default preview)
+        let bytes = std::fs::read(&png_path_y)?;
         let img = ::image::load_from_memory(&bytes)?;
-        Ok((image::Handle::from_bytes(bytes), png_path, img.width(), img.height()))
+        Ok((
+            image::Handle::from_bytes(bytes),
+            png_path_y,
+            img.width(),
+            img.height(),
+        ))
     })();
 
     result.map_err(|e| e.to_string())
@@ -1383,5 +1709,3 @@ fn hex_to_color(hex: &str) -> Color {
         Color::BLACK
     }
 }
-
-

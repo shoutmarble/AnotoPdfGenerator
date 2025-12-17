@@ -60,12 +60,24 @@ impl AnotoCodec {
     }
 
     fn reconstruct(&self, coeffs: &[i8]) -> i32 {
-        coeffs.iter().enumerate().map(|(i, &c)| c as i32 * self.bases[i]).sum()
+        coeffs
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| c as i32 * self.bases[i])
+            .sum()
     }
 
     fn _delta(&self, pos: i32) -> i32 {
-        let rs: Vec<i32> = self.sns_lengths.iter().map(|&len| pos % len as i32).collect();
-        let coeffs: Vec<i8> = rs.iter().enumerate().map(|(i, &r)| self.sns_cyclic[i][r as usize]).collect();
+        let rs: Vec<i32> = self
+            .sns_lengths
+            .iter()
+            .map(|&len| pos % len as i32)
+            .collect();
+        let coeffs: Vec<i8> = rs
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| self.sns_cyclic[i][r as usize])
+            .collect();
         self.reconstruct(&coeffs) + self.delta_range.0
     }
 
@@ -194,13 +206,13 @@ impl AnotoCodec {
 
         // Extract the x-direction pattern from the first row
         let x_pattern: Vec<i32> = (0..6).map(|i| section[[0, i, 0]] as i32).collect();
-        
-        // Extract the y-direction pattern from the first column  
+
+        // Extract the y-direction pattern from the first column
         let y_pattern: Vec<i32> = (0..6).map(|i| section[[i, 0, 1]] as i32).collect();
 
         // Find the roll value for x-direction
         let x_roll = self.find_roll(&x_pattern)?;
-        
+
         // Find the roll value for y-direction
         let y_roll = self.find_roll(&y_pattern)?;
 
@@ -211,17 +223,17 @@ impl AnotoCodec {
 
     fn find_roll(&self, pattern: &[i32]) -> Option<i32> {
         let mns_len = self.mns_length as i32;
-        
+
         // Try all possible roll values
         for roll in 0..mns_len {
             let rolled_mns = self.roll_mns(roll);
             let rolled_pattern: Vec<i32> = rolled_mns.iter().take(6).map(|&x| x as i32).collect();
-            
+
             if rolled_pattern == pattern {
                 return Some(roll);
             }
         }
-        
+
         None
     }
 }
@@ -230,61 +242,47 @@ impl AnotoCodec {
 pub fn anoto_6x6_a4_fixed() -> AnotoCodec {
     // Actual Anoto sequences from the patents
     let mns = vec![
-        0,0,0,0,0,0,1,0,0,1,1,1,1,1,0,1,0,0,
-        1,0,0,0,0,1,1,1,0,1,1,1,0,0,1,0,1,0,
-        1,0,0,0,1,0,1,1,0,1,1,0,0,1,1,0,1,0,
-        1,1,1,1,0,0,0,1,1
+        0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1,
+        0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0,
+        0, 1, 1,
     ];
-    
+
     let a1 = vec![
-        0,0,0,0,0,1,0,0,0,0,2,0,1,0,0,1,0,1,0,
-        0,2,0,0,0,1,1,0,0,0,1,2,0,0,1,0,2,0,0,
-        2,0,2,0,1,1,0,1,0,1,1,0,2,0,1,2,0,1,0,
-        1,2,0,2,1,0,0,1,1,1,0,1,1,1,1,0,2,1,0,
-        1,0,2,1,1,0,0,1,2,1,0,1,1,2,0,0,0,2,1,
-        0,2,0,2,1,1,1,0,0,2,1,2,0,1,1,1,2,0,2,
-        0,0,1,1,2,1,0,0,0,2,2,0,1,0,2,2,0,0,1,
-        2,2,0,2,0,2,2,1,0,1,2,1,2,1,0,2,1,2,1,
-        1,0,2,2,1,2,1,2,0,2,2,0,2,2,2,0,1,1,2,
-        2,1,1,0,1,2,2,2,2,1,2,0,0,2,2,1,1,2,1,
-        2,2,1,0,2,2,2,2,2,0,2,1,2,2,2,1,1,1,2,
-        1,1,2,0,1,2,2,1,2,2,0,1,2,1,1,1,1,2,2,
-        2,0,0,2,1,1,2,2
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 1, 0, 0, 1, 0, 1, 0, 0, 2, 0, 0, 0, 1, 1, 0, 0, 0, 1,
+        2, 0, 0, 1, 0, 2, 0, 0, 2, 0, 2, 0, 1, 1, 0, 1, 0, 1, 1, 0, 2, 0, 1, 2, 0, 1, 0, 1, 2, 0,
+        2, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 2, 1, 0, 1, 0, 2, 1, 1, 0, 0, 1, 2, 1, 0, 1, 1, 2,
+        0, 0, 0, 2, 1, 0, 2, 0, 2, 1, 1, 1, 0, 0, 2, 1, 2, 0, 1, 1, 1, 2, 0, 2, 0, 0, 1, 1, 2, 1,
+        0, 0, 0, 2, 2, 0, 1, 0, 2, 2, 0, 0, 1, 2, 2, 0, 2, 0, 2, 2, 1, 0, 1, 2, 1, 2, 1, 0, 2, 1,
+        2, 1, 1, 0, 2, 2, 1, 2, 1, 2, 0, 2, 2, 0, 2, 2, 2, 0, 1, 1, 2, 2, 1, 1, 0, 1, 2, 2, 2, 2,
+        1, 2, 0, 0, 2, 2, 1, 1, 2, 1, 2, 2, 1, 0, 2, 2, 2, 2, 2, 0, 2, 1, 2, 2, 2, 1, 1, 1, 2, 1,
+        1, 2, 0, 1, 2, 2, 1, 2, 2, 0, 1, 2, 1, 1, 1, 1, 2, 2, 2, 0, 0, 2, 1, 1, 2, 2,
     ];
-    
+
     let a2 = vec![
-        0,0,0,0,0,1,0,0,0,0,2,0,1,0,0,1,0,1,0,
-        1,1,0,0,0,1,1,1,1,0,0,1,1,0,1,0,0,2,0,
-        0,0,1,2,0,1,0,1,2,1,0,0,0,2,1,1,1,0,1,
-        1,1,0,2,1,0,0,1,2,1,2,1,0,1,0,2,0,1,1,
-        0,2,0,0,1,0,2,1,2,0,0,0,2,2,0,0,1,1,2,
-        0,2,0,0,2,0,2,0,1,2,0,0,2,2,1,1,0,0,2,
-        1,0,1,1,2,1,0,2,0,2,2,1,0,0,2,2,2,1,0,
-        1,2,2,0,0,2,1,2,2,1,1,1,1,1,2,0,0,1,2,
-        2,1,2,0,1,1,1,2,1,1,2,0,1,2,1,1,1,2,2,
-        0,2,2,0,1,1,2,2,2,2,1,2,1,2,2,0,1,2,2,
-        2,0,2,0,2,1,1,2,2,1,0,2,2,0,2,1,0,2,1,
-        1,0,2,2,2,2,0,1,0,2,2,1,2,2,2,1,1,2,1,
-        2,0,2,2,2
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0,
+        1, 1, 0, 1, 0, 0, 2, 0, 0, 0, 1, 2, 0, 1, 0, 1, 2, 1, 0, 0, 0, 2, 1, 1, 1, 0, 1, 1, 1, 0,
+        2, 1, 0, 0, 1, 2, 1, 2, 1, 0, 1, 0, 2, 0, 1, 1, 0, 2, 0, 0, 1, 0, 2, 1, 2, 0, 0, 0, 2, 2,
+        0, 0, 1, 1, 2, 0, 2, 0, 0, 2, 0, 2, 0, 1, 2, 0, 0, 2, 2, 1, 1, 0, 0, 2, 1, 0, 1, 1, 2, 1,
+        0, 2, 0, 2, 2, 1, 0, 0, 2, 2, 2, 1, 0, 1, 2, 2, 0, 0, 2, 1, 2, 2, 1, 1, 1, 1, 1, 2, 0, 0,
+        1, 2, 2, 1, 2, 0, 1, 1, 1, 2, 1, 1, 2, 0, 1, 2, 1, 1, 1, 2, 2, 0, 2, 2, 0, 1, 1, 2, 2, 2,
+        2, 1, 2, 1, 2, 2, 0, 1, 2, 2, 2, 0, 2, 0, 2, 1, 1, 2, 2, 1, 0, 2, 2, 0, 2, 1, 0, 2, 1, 1,
+        0, 2, 2, 2, 2, 0, 1, 0, 2, 2, 1, 2, 2, 2, 1, 1, 2, 1, 2, 0, 2, 2, 2,
     ];
-    
+
     let a3 = vec![
-        0,0,0,0,0,1,0,0,1,1,0,0,0,1,1,1,1,0,0,
-        1,0,1,0,1,1,0,1,1,1,0,1
+        0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1,
     ];
-    
+
     let a4_alt = vec![
-        0, 0, 0, 0, 2, 2, 2, 2, 0, 2, 2, 2, 1, 0, 2, 2, 2, 0, 0, 2, 2, 1,
-        2, 0, 2, 2, 1, 1, 0, 2, 2, 1, 0, 0, 2, 2, 0, 0, 0, 2, 1, 2, 2, 0,
-        2, 1, 2, 1, 0, 2, 1, 2, 0, 0, 2, 1, 1, 2, 0, 2, 1, 1, 1, 0, 2, 1,
-        1, 0, 0, 2, 1, 0, 0, 0, 2, 0, 2, 2, 0, 2, 0, 2, 1, 0, 2, 0, 2, 0,
-        0, 2, 0, 1, 0, 0, 2, 0, 0, 0, 0, 1, 2, 2, 2, 0, 1, 2, 2, 1, 0, 1,
-        2, 2, 0, 0, 1, 2, 1, 2, 0, 1, 2, 1, 1, 0, 1, 2, 1, 0, 0, 1, 2, 0,
-        0, 0, 1, 1, 2, 2, 0, 1, 1, 2, 1, 0, 1, 1, 2, 0, 0, 1, 1, 1, 2, 0,
-        1, 1, 1, 1, 2, 2, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 1, 1, 1, 2, 1, 2,
-        2, 1, 2, 1, 2, 1, 1, 2, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0,
-        0, 0, 1, 0, 2, 2, 0, 1, 0, 2, 1, 0, 1, 0, 2, 0, 0, 1, 0, 1, 2, 0,
-        2, 0, 1, 2, 0, 1, 0, 1, 1, 0, 2, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1
+        0, 0, 0, 0, 2, 2, 2, 2, 0, 2, 2, 2, 1, 0, 2, 2, 2, 0, 0, 2, 2, 1, 2, 0, 2, 2, 1, 1, 0, 2,
+        2, 1, 0, 0, 2, 2, 0, 0, 0, 2, 1, 2, 2, 0, 2, 1, 2, 1, 0, 2, 1, 2, 0, 0, 2, 1, 1, 2, 0, 2,
+        1, 1, 1, 0, 2, 1, 1, 0, 0, 2, 1, 0, 0, 0, 2, 0, 2, 2, 0, 2, 0, 2, 1, 0, 2, 0, 2, 0, 0, 2,
+        0, 1, 0, 0, 2, 0, 0, 0, 0, 1, 2, 2, 2, 0, 1, 2, 2, 1, 0, 1, 2, 2, 0, 0, 1, 2, 1, 2, 0, 1,
+        2, 1, 1, 0, 1, 2, 1, 0, 0, 1, 2, 0, 0, 0, 1, 1, 2, 2, 0, 1, 1, 2, 1, 0, 1, 1, 2, 0, 0, 1,
+        1, 1, 2, 0, 1, 1, 1, 1, 2, 2, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 1, 1, 1, 2, 1, 2, 2, 1, 2, 1,
+        2, 1, 1, 2, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 2, 2, 0, 1, 0, 2, 1, 0,
+        1, 0, 2, 0, 0, 1, 0, 1, 2, 0, 2, 0, 1, 2, 0, 1, 0, 1, 1, 0, 2, 0, 1, 1, 0, 1, 0, 1, 0, 0,
+        1,
     ];
 
     let sns = [a1.clone(), a2.clone(), a3.clone(), a4_alt.clone()];
@@ -319,19 +317,35 @@ fn make_cyclic(seq: &[i8], order: usize) -> Vec<i8> {
     cyclic
 }
 
-pub fn gen_matrix(height: usize, width: usize, sect_u: i32, sect_v: i32) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn gen_matrix(
+    height: usize,
+    width: usize,
+    sect_u: i32,
+    sect_v: i32,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bitmatrix = generate_matrix_only(height, width, sect_u, sect_v)?;
     save_generated_matrix(&bitmatrix, height, width, sect_u, sect_v)?;
     Ok(())
 }
 
-pub fn generate_matrix_only(height: usize, width: usize, sect_u: i32, sect_v: i32) -> std::result::Result<Array3<i32>, Box<dyn std::error::Error>> {
+pub fn generate_matrix_only(
+    height: usize,
+    width: usize,
+    sect_u: i32,
+    sect_v: i32,
+) -> std::result::Result<Array3<i32>, Box<dyn std::error::Error>> {
     let codec = anoto_6x6_a4_fixed();
     let bitmatrix = codec.encode_bitmatrix((height, width), (sect_u, sect_v));
     Ok(bitmatrix)
 }
 
-pub fn save_generated_matrix(bitmatrix: &Array3<i32>, height: usize, width: usize, sect_u: i32, sect_v: i32) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn save_generated_matrix(
+    bitmatrix: &Array3<i32>,
+    height: usize,
+    width: usize,
+    sect_u: i32,
+    sect_v: i32,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let base_filename = format!("G__{}__{}__{}__{}", height, width, sect_u, sect_v);
 
     // Create output directory
@@ -347,17 +361,25 @@ pub fn save_generated_matrix(bitmatrix: &Array3<i32>, height: usize, width: usiz
     crate::make_plots::draw_dots(&bitmatrix.mapv(|x| x as i8), 1.0, &base_filename)?;
 
     // Generate PDF
-    crate::pdf_dotpaper::gen_pdf::gen_pdf_from_matrix_data(bitmatrix, &format!("{}.pdf", base_filename), &crate::pdf_dotpaper::gen_pdf::PdfConfig::default())?;
+    crate::pdf_dotpaper::gen_pdf::gen_pdf_from_matrix_data(
+        bitmatrix,
+        &format!("{}.pdf", base_filename),
+        &crate::pdf_dotpaper::gen_pdf::PdfConfig::default(),
+    )?;
 
     Ok(())
 }
 
-pub fn load_matrix_from_json(json_path: &str) -> std::result::Result<Array3<i32>, Box<dyn std::error::Error>> {
+pub fn load_matrix_from_json(
+    json_path: &str,
+) -> std::result::Result<Array3<i32>, Box<dyn std::error::Error>> {
     let bitmatrix = crate::persist_json::load_array3_from_json(json_path)?;
     Ok(bitmatrix)
 }
 
-pub fn load_matrix_from_txt(txt_path: &str) -> std::result::Result<Array3<i32>, Box<dyn std::error::Error>> {
+pub fn load_matrix_from_txt(
+    txt_path: &str,
+) -> std::result::Result<Array3<i32>, Box<dyn std::error::Error>> {
     use std::fs::File;
     use std::io::Read;
 
@@ -378,8 +400,9 @@ pub fn load_matrix_from_txt(txt_path: &str) -> std::result::Result<Array3<i32>, 
                     j += 1;
                 }
                 if j < chars.len() {
-                    let inner: String = chars[i+1..j].iter().collect();
-                    let nums: Vec<i32> = inner.split_whitespace()
+                    let inner: String = chars[i + 1..j].iter().collect();
+                    let nums: Vec<i32> = inner
+                        .split_whitespace()
                         .filter_map(|s| s.parse().ok())
                         .collect();
                     if nums.len() == 2 {
@@ -413,15 +436,18 @@ pub fn load_matrix_from_txt(txt_path: &str) -> std::result::Result<Array3<i32>, 
     Ok(bitmatrix)
 }
 
-pub fn save_matrix_from_json(bitmatrix: &Array3<i32>, json_path: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn save_matrix_from_json(
+    bitmatrix: &Array3<i32>,
+    json_path: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (height, width, _) = bitmatrix.dim();
-    
+
     // Try to extract sect_u and sect_v from the filename if it follows G__ pattern
     let stem = std::path::Path::new(json_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
-    
+
     let (sect_u, sect_v) = if let Some(parts) = stem.strip_prefix("G__") {
         let nums: Vec<&str> = parts.split("__").collect();
         if nums.len() >= 4 {
@@ -432,7 +458,7 @@ pub fn save_matrix_from_json(bitmatrix: &Array3<i32>, json_path: &str) -> std::r
     } else {
         (10, 2)
     };
-    
+
     let base_filename = format!("J__{}__{}__{}__{}", height, width, sect_u, sect_v);
 
     // Save as TXT
@@ -442,64 +468,72 @@ pub fn save_matrix_from_json(bitmatrix: &Array3<i32>, json_path: &str) -> std::r
     crate::make_plots::draw_dots(&bitmatrix.mapv(|x| x as i8), 1.0, &base_filename)?;
 
     // Generate PDF
-    crate::pdf_dotpaper::gen_pdf::gen_pdf_from_matrix_data(bitmatrix, &format!("{}.pdf", base_filename), &crate::pdf_dotpaper::gen_pdf::PdfConfig::default())?;
+    crate::pdf_dotpaper::gen_pdf::gen_pdf_from_matrix_data(
+        bitmatrix,
+        &format!("{}.pdf", base_filename),
+        &crate::pdf_dotpaper::gen_pdf::PdfConfig::default(),
+    )?;
 
     Ok(())
 }
 
-pub fn extract_6x6_section(bitmatrix: &Array3<i32>, pos: (i32, i32)) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn extract_6x6_section(
+    bitmatrix: &Array3<i32>,
+    pos: (i32, i32),
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (rows, cols, _) = bitmatrix.dim();
     let (row, col) = (pos.0 as usize, pos.1 as usize);
-    
+
     println!("Matrix size [{}, {}]", rows, cols);
     println!("Requested position ({}, {})", row, col);
-    
+
     let max_row = rows.saturating_sub(6);
     let max_col = cols.saturating_sub(6);
-    println!("Maximum 6x6 position for this matrix is ({}, {})", max_row, max_col);
-    
+    println!(
+        "Maximum 6x6 position for this matrix is ({}, {})",
+        max_row, max_col
+    );
+
     // Create output directory
     std::fs::create_dir_all("output")?;
-    
+
     if row > max_row || col > max_col {
         println!("Position out of bounds, returning zeroed 6x6 section");
         // Create a zeroed 6x6 section
         let zeroed_section = Array3::<i32>::zeros((6, 6, 2));
-        
+
         // Save the zeroed section
         let filename = format!("section_{}_{}", row, col);
         crate::persist_json::save_as_json(&zeroed_section, &filename)?;
         crate::persist_json::save_as_txt(&zeroed_section, &filename)?;
-        
+
         return Ok(());
     }
-    
+
     // Extract the 6x6 section
-    let section = bitmatrix.slice(s![
-        row..row + 6,
-        col..col + 6,
-        ..
-    ]);
+    let section = bitmatrix.slice(s![row..row + 6, col..col + 6, ..]);
     let section = section.to_owned();
-    
+
     // Save the section
     let filename = format!("section_{}_{}", row, col);
     crate::persist_json::save_as_json(&section, &filename)?;
     crate::persist_json::save_as_txt(&section, &filename)?;
-    
+
     Ok(())
 }
 
-pub fn gen_matrix_from_json(json_path: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn gen_matrix_from_json(
+    json_path: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bitmatrix = crate::persist_json::load_array3_from_json(json_path)?;
     let (height, width, _) = bitmatrix.dim();
-    
+
     // Try to extract sect_u and sect_v from the filename if it follows G__ pattern
     let stem = std::path::Path::new(json_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
-    
+
     let (sect_u, sect_v) = if let Some(parts) = stem.strip_prefix("G__") {
         let nums: Vec<&str> = parts.split("__").collect();
         if nums.len() >= 4 {
@@ -510,7 +544,7 @@ pub fn gen_matrix_from_json(json_path: &str) -> std::result::Result<(), Box<dyn 
     } else {
         (10, 2)
     };
-    
+
     let base_filename = format!("J__{}__{}__{}__{}", height, width, sect_u, sect_v);
 
     // Save as TXT
@@ -520,7 +554,11 @@ pub fn gen_matrix_from_json(json_path: &str) -> std::result::Result<(), Box<dyn 
     crate::make_plots::draw_dots(&bitmatrix.mapv(|x| x as i8), 1.0, &base_filename)?;
 
     // Generate PDF
-    crate::pdf_dotpaper::gen_pdf::gen_pdf_from_matrix_data(&bitmatrix, &format!("{}.pdf", base_filename), &crate::pdf_dotpaper::gen_pdf::PdfConfig::default())?;
+    crate::pdf_dotpaper::gen_pdf::gen_pdf_from_matrix_data(
+        &bitmatrix,
+        &format!("{}.pdf", base_filename),
+        &crate::pdf_dotpaper::gen_pdf::PdfConfig::default(),
+    )?;
 
     Ok(())
 }

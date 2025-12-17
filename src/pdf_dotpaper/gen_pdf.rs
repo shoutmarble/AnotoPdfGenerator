@@ -1,4 +1,4 @@
-use oxidize_pdf::{Document, Page, Color};
+use oxidize_pdf::{Color, Document, Page};
 
 #[derive(Clone, Debug)]
 pub struct PdfConfig {
@@ -47,7 +47,11 @@ enum AnotoDot {
     Right,
 }
 
-pub fn gen_pdf_from_matrix_data(bitmatrix: &ndarray::Array3<i32>, filename: &str, config: &PdfConfig) -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub fn gen_pdf_from_matrix_data(
+    bitmatrix: &ndarray::Array3<i32>,
+    filename: &str,
+    config: &PdfConfig,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut doc = Document::new();
     doc.set_title("Anoto PDF");
     doc.set_author("Rust");
@@ -56,15 +60,15 @@ pub fn gen_pdf_from_matrix_data(bitmatrix: &ndarray::Array3<i32>, filename: &str
 
     let height = bitmatrix.dim().0;
     let width = bitmatrix.dim().1;
-    
+
     let page_width = page.width();
     let page_height = page.height();
-    
+
     let grid_width = (width as f64 - 1.0) * config.grid_spacing as f64;
     let grid_height = (height as f64 - 1.0) * config.grid_spacing as f64;
-    
-    let margin_x = (page_width as f64 - grid_width) / 2.0;
-    let margin_y = (page_height as f64 - grid_height) / 2.0;
+
+    let margin_x = (page_width - grid_width) / 2.0;
+    let margin_y = (page_height - grid_height) / 2.0;
 
     for y in 0..height {
         for x in 0..width {
@@ -95,7 +99,6 @@ pub fn gen_pdf_from_matrix_data(bitmatrix: &ndarray::Array3<i32>, filename: &str
 }
 
 fn draw_anoto_dot(page: &mut Page, x: f64, y: f64, direction: AnotoDot, config: &PdfConfig) {
-
     let radius = config.dot_size as f64;
     let offset = config.offset_from_origin as f64;
 
@@ -106,29 +109,27 @@ fn draw_anoto_dot(page: &mut Page, x: f64, y: f64, direction: AnotoDot, config: 
                 .set_fill_color(parse_hex_color(&config.color_up))
                 .circle(x, y_up, radius)
                 .fill();
-        },
+        }
         AnotoDot::Down => {
             let y_down = y - offset;
             page.graphics()
                 .set_fill_color(parse_hex_color(&config.color_down))
                 .circle(x, y_down, radius)
                 .fill();
-        },
+        }
         AnotoDot::Left => {
             let x_left = x - offset;
             page.graphics()
                 .set_fill_color(parse_hex_color(&config.color_left))
                 .circle(x_left, y, radius)
                 .fill();
-        },
+        }
         AnotoDot::Right => {
             let x_right = x + offset;
             page.graphics()
                 .set_fill_color(parse_hex_color(&config.color_right))
                 .circle(x_right, y, radius)
                 .fill();
-        },
-
+        }
     }
-
 }

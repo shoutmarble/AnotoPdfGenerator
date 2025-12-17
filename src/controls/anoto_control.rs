@@ -1,9 +1,9 @@
-use iced::widget::{button, column, row, text, canvas, vertical_space, horizontal_space, container};
-use iced::{Element, Length, Color, Point, Rectangle, Theme, Renderer, Alignment, Border};
+use crate::fonts::JB_MONO;
 use iced::mouse;
+use iced::widget::{button, canvas, column, container, row, space, text};
+use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Renderer, Theme};
 use iced_aw::color_picker::ColorPicker;
 use iced_aw::number_input::NumberInput;
-use crate::fonts::JB_MONO;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Direction {
@@ -13,23 +13,12 @@ pub enum Direction {
     Right,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct State {
     pub show_up: bool,
     pub show_down: bool,
     pub show_left: bool,
     pub show_right: bool,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            show_up: false,
-            show_down: false,
-            show_left: false,
-            show_right: false,
-        }
-    }
 }
 
 pub fn anoto_control<'a, Message>(
@@ -52,14 +41,38 @@ pub fn anoto_control<'a, Message>(
     on_dot_size_change: impl Fn(f32) -> Message + 'static + Clone,
     on_origin_dist_change: impl Fn(f32) -> Message + 'static + Clone,
     on_dot_origin_dist_change: impl Fn(f32) -> Message + 'static + Clone,
-) -> Element<'a, Message> 
+) -> Element<'a, Message>
 where
     Message: Clone + 'static,
 {
-    let up_dot = dot_button(Direction::Up, color_up, state.show_up, on_toggle_up, on_color_up_change);
-    let down_dot = dot_button(Direction::Down, color_down, state.show_down, on_toggle_down, on_color_down_change);
-    let left_dot = dot_button(Direction::Left, color_left, state.show_left, on_toggle_left, on_color_left_change);
-    let right_dot = dot_button(Direction::Right, color_right, state.show_right, on_toggle_right, on_color_right_change);
+    let up_dot = dot_button(
+        Direction::Up,
+        color_up,
+        state.show_up,
+        on_toggle_up,
+        on_color_up_change,
+    );
+    let down_dot = dot_button(
+        Direction::Down,
+        color_down,
+        state.show_down,
+        on_toggle_down,
+        on_color_down_change,
+    );
+    let left_dot = dot_button(
+        Direction::Left,
+        color_left,
+        state.show_left,
+        on_toggle_left,
+        on_color_left_change,
+    );
+    let right_dot = dot_button(
+        Direction::Right,
+        color_right,
+        state.show_right,
+        on_toggle_right,
+        on_color_right_change,
+    );
 
     // Round to 1 decimal place for display
     let dot_size = (dot_size * 10.0).round() / 10.0;
@@ -69,8 +82,8 @@ where
         NumberInput::new(&dot_size, 0.1..=100.0, on_dot_size_change)
             .step(0.1)
             .width(Length::Fixed(70.0))
-            .font(JB_MONO)
-    ].align_x(Alignment::Center);
+    ]
+    .align_x(Alignment::Center);
 
     let origin_dist = (origin_dist * 10.0).round() / 10.0;
     let origin_dist_input = column![
@@ -78,8 +91,8 @@ where
         NumberInput::new(&origin_dist, 0.0..=100.0, on_origin_dist_change)
             .step(0.1)
             .width(Length::Fixed(70.0))
-            .font(JB_MONO)
-    ].align_x(Alignment::Center);
+    ]
+    .align_x(Alignment::Center);
 
     let dot_origin_dist = (dot_origin_dist * 10.0).round() / 10.0;
     let dot_origin_dist_input = column![
@@ -87,42 +100,42 @@ where
         NumberInput::new(&dot_origin_dist, 0.0..=100.0, on_dot_origin_dist_change)
             .step(0.1)
             .width(Length::Fixed(70.0))
-            .font(JB_MONO)
-    ].align_x(Alignment::Center);
+    ]
+    .align_x(Alignment::Center);
 
     // Layout
     // Row 1: Dot Size, Up Dot, Origin Dist
     let row1 = row![
         dot_size_input,
-        horizontal_space().width(20),
+        space().width(Length::Fixed(20.0)),
         up_dot,
-        horizontal_space().width(20),
+        space().width(Length::Fixed(20.0)),
         origin_dist_input
-    ].align_y(Alignment::Center);
+    ]
+    .align_y(Alignment::Center);
 
     // Row 2: Left Dot, Dot-Origin Dist, Right Dot
     let row2 = row![
         left_dot,
-        horizontal_space().width(20),
+        space().width(Length::Fixed(20.0)),
         dot_origin_dist_input,
-        horizontal_space().width(20),
+        space().width(Length::Fixed(20.0)),
         right_dot
-    ].align_y(Alignment::Center);
+    ]
+    .align_y(Alignment::Center);
 
     // Row 3: Down Dot
-    let row3 = row![
-        down_dot
-    ].align_y(Alignment::Center);
+    let row3 = row![down_dot].align_y(Alignment::Center);
 
     container(
         column![
             row1,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             row2,
-            vertical_space().height(20),
+            space().height(Length::Fixed(20.0)),
             row3
         ]
-        .align_x(Alignment::Center)
+        .align_x(Alignment::Center),
     )
     .padding(10)
     .style(|_theme| container::Style {
@@ -155,14 +168,7 @@ where
         .padding(0)
         .style(button::text);
 
-    ColorPicker::new(
-        show_picker,
-        color,
-        btn,
-        on_toggle(false),
-        on_change,
-    )
-    .into()
+    ColorPicker::new(show_picker, color, btn, on_toggle(false), on_change).into()
 }
 
 struct DotProgram {
@@ -192,41 +198,68 @@ impl<Message> canvas::Program<Message> for DotProgram {
         // Draw arrow
         let arrow_color = Color::WHITE; // Or contrasting color
         let arrow_size = radius * 0.6;
-        
-        let arrow_path = canvas::Path::new(|p| {
-            match self.direction {
-                Direction::Up => {
-                    p.move_to(Point::new(center.x, center.y + arrow_size / 2.0));
-                    p.line_to(Point::new(center.x, center.y - arrow_size / 2.0));
-                    p.line_to(Point::new(center.x - arrow_size / 3.0, center.y - arrow_size / 6.0));
-                    p.move_to(Point::new(center.x, center.y - arrow_size / 2.0));
-                    p.line_to(Point::new(center.x + arrow_size / 3.0, center.y - arrow_size / 6.0));
-                }
-                Direction::Down => {
-                    p.move_to(Point::new(center.x, center.y - arrow_size / 2.0));
-                    p.line_to(Point::new(center.x, center.y + arrow_size / 2.0));
-                    p.line_to(Point::new(center.x - arrow_size / 3.0, center.y + arrow_size / 6.0));
-                    p.move_to(Point::new(center.x, center.y + arrow_size / 2.0));
-                    p.line_to(Point::new(center.x + arrow_size / 3.0, center.y + arrow_size / 6.0));
-                }
-                Direction::Left => {
-                    p.move_to(Point::new(center.x + arrow_size / 2.0, center.y));
-                    p.line_to(Point::new(center.x - arrow_size / 2.0, center.y));
-                    p.line_to(Point::new(center.x - arrow_size / 6.0, center.y - arrow_size / 3.0));
-                    p.move_to(Point::new(center.x - arrow_size / 2.0, center.y));
-                    p.line_to(Point::new(center.x - arrow_size / 6.0, center.y + arrow_size / 3.0));
-                }
-                Direction::Right => {
-                    p.move_to(Point::new(center.x - arrow_size / 2.0, center.y));
-                    p.line_to(Point::new(center.x + arrow_size / 2.0, center.y));
-                    p.line_to(Point::new(center.x + arrow_size / 6.0, center.y - arrow_size / 3.0));
-                    p.move_to(Point::new(center.x + arrow_size / 2.0, center.y));
-                    p.line_to(Point::new(center.x + arrow_size / 6.0, center.y + arrow_size / 3.0));
-                }
+
+        let arrow_path = canvas::Path::new(|p| match self.direction {
+            Direction::Up => {
+                p.move_to(Point::new(center.x, center.y + arrow_size / 2.0));
+                p.line_to(Point::new(center.x, center.y - arrow_size / 2.0));
+                p.line_to(Point::new(
+                    center.x - arrow_size / 3.0,
+                    center.y - arrow_size / 6.0,
+                ));
+                p.move_to(Point::new(center.x, center.y - arrow_size / 2.0));
+                p.line_to(Point::new(
+                    center.x + arrow_size / 3.0,
+                    center.y - arrow_size / 6.0,
+                ));
+            }
+            Direction::Down => {
+                p.move_to(Point::new(center.x, center.y - arrow_size / 2.0));
+                p.line_to(Point::new(center.x, center.y + arrow_size / 2.0));
+                p.line_to(Point::new(
+                    center.x - arrow_size / 3.0,
+                    center.y + arrow_size / 6.0,
+                ));
+                p.move_to(Point::new(center.x, center.y + arrow_size / 2.0));
+                p.line_to(Point::new(
+                    center.x + arrow_size / 3.0,
+                    center.y + arrow_size / 6.0,
+                ));
+            }
+            Direction::Left => {
+                p.move_to(Point::new(center.x + arrow_size / 2.0, center.y));
+                p.line_to(Point::new(center.x - arrow_size / 2.0, center.y));
+                p.line_to(Point::new(
+                    center.x - arrow_size / 6.0,
+                    center.y - arrow_size / 3.0,
+                ));
+                p.move_to(Point::new(center.x - arrow_size / 2.0, center.y));
+                p.line_to(Point::new(
+                    center.x - arrow_size / 6.0,
+                    center.y + arrow_size / 3.0,
+                ));
+            }
+            Direction::Right => {
+                p.move_to(Point::new(center.x - arrow_size / 2.0, center.y));
+                p.line_to(Point::new(center.x + arrow_size / 2.0, center.y));
+                p.line_to(Point::new(
+                    center.x + arrow_size / 6.0,
+                    center.y - arrow_size / 3.0,
+                ));
+                p.move_to(Point::new(center.x + arrow_size / 2.0, center.y));
+                p.line_to(Point::new(
+                    center.x + arrow_size / 6.0,
+                    center.y + arrow_size / 3.0,
+                ));
             }
         });
 
-        frame.stroke(&arrow_path, canvas::Stroke::default().with_color(arrow_color).with_width(2.0));
+        frame.stroke(
+            &arrow_path,
+            canvas::Stroke::default()
+                .with_color(arrow_color)
+                .with_width(2.0),
+        );
 
         vec![frame.into_geometry()]
     }

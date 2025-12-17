@@ -1,10 +1,10 @@
 pub mod dotmatrix;
+pub use dotmatrix::anoto_6x6_a4_fixed;
+pub use dotmatrix::extract_6x6_section;
 pub use dotmatrix::gen_matrix;
 pub use dotmatrix::gen_matrix_from_json;
 pub use dotmatrix::generate_matrix_only;
-pub use dotmatrix::save_generated_matrix;
 pub use dotmatrix::load_matrix_from_json;
 pub use dotmatrix::load_matrix_from_txt;
+pub use dotmatrix::save_generated_matrix;
 pub use dotmatrix::save_matrix_from_json;
-pub use dotmatrix::extract_6x6_section;
-pub use dotmatrix::anoto_6x6_a4_fixed;

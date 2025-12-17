@@ -1,7 +1,6 @@
-
-use serde_json::Value;
 use anoto_pdf::codec::anoto_6x6_a4_fixed;
 use ndarray::Array3;
+use serde_json::Value;
 
 fn main() {
     let input_json = r#"
@@ -60,14 +59,14 @@ fn decode_json_input(input: &str) -> String {
                 } else {
                     // Maybe it's ["↑"]
                     if let Some(s) = cell_arr[0].as_str() {
-                         return map_direction(s);
+                        return map_direction(s);
                     }
                 }
             } else if cell_arr.len() == 1 {
-                 // Case: ["↑"]
-                 if let Some(s) = cell_arr[0].as_str() {
-                     return map_direction(s);
-                 }
+                // Case: ["↑"]
+                if let Some(s) = cell_arr[0].as_str() {
+                    return map_direction(s);
+                }
             }
         } else if let Some(s) = cell.as_str() {
             // Case: "↑"
@@ -79,29 +78,34 @@ fn decode_json_input(input: &str) -> String {
     // Find the matrix
     let mut matrix_val = &parsed;
     while let Some(arr) = matrix_val.as_array() {
-        if arr.is_empty() { return "Empty array".to_string(); }
-        
+        if arr.is_empty() {
+            return "Empty array".to_string();
+        }
+
         if let Some(first_row) = arr[0].as_array() {
-             if first_row.is_empty() { return "Empty row".to_string(); }
-             
-             let is_cell = |v: &Value| {
-                 if v.is_string() { true }
-                 else if let Some(a) = v.as_array() {
-                     // It's a cell if it's [num, num] or ["str"]
-                     // It's NOT a cell if it's [[...]] (array of arrays)
-                     !a.is_empty() && !a[0].is_array()
-                 } else {
-                     false
-                 }
-             };
-             
-             if is_cell(&first_row[0]) {
-                 // Found the matrix!
-                 break;
-             } else {
-                 // Go deeper
-                 matrix_val = &arr[0];
-             }
+            if first_row.is_empty() {
+                return "Empty row".to_string();
+            }
+
+            let is_cell = |v: &Value| {
+                if v.is_string() {
+                    true
+                } else if let Some(a) = v.as_array() {
+                    // It's a cell if it's [num, num] or ["str"]
+                    // It's NOT a cell if it's [[...]] (array of arrays)
+                    !a.is_empty() && !a[0].is_array()
+                } else {
+                    false
+                }
+            };
+
+            if is_cell(&first_row[0]) {
+                // Found the matrix!
+                break;
+            } else {
+                // Go deeper
+                matrix_val = &arr[0];
+            }
         } else {
             return "Invalid structure".to_string();
         }
@@ -129,9 +133,13 @@ fn decode_json_input(input: &str) -> String {
     }
 
     let height = grid.len();
-    if height < 6 { return "Matrix too small (height < 6)".to_string(); }
+    if height < 6 {
+        return "Matrix too small (height < 6)".to_string();
+    }
     let width = grid[0].len();
-    if width < 6 { return "Matrix too small (width < 6)".to_string(); }
+    if width < 6 {
+        return "Matrix too small (width < 6)".to_string();
+    }
 
     // Check all rows have same width
     if grid.iter().any(|r| r.len() != width) {
@@ -149,7 +157,7 @@ fn decode_json_input(input: &str) -> String {
             let mut bits = Array3::<i8>::zeros((6, 6, 2));
             for i in 0..6 {
                 for j in 0..6 {
-                    let (b0, b1) = grid[r+i][c+j];
+                    let (b0, b1) = grid[r + i][c + j];
                     bits[[i, j, 0]] = b0;
                     bits[[i, j, 1]] = b1;
                 }
@@ -157,9 +165,11 @@ fn decode_json_input(input: &str) -> String {
 
             match codec.decode_position(&bits) {
                 Ok((x, y)) => {
-                    if !results.is_empty() { results.push('\n'); }
+                    if !results.is_empty() {
+                        results.push('\n');
+                    }
                     results.push_str(&format!("Position: ({}, {})", x, y));
-                },
+                }
                 Err(e) => {
                     println!("Failed at ({}, {}): {}", r, c, e);
                 }

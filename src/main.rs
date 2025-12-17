@@ -1,9 +1,7 @@
 use clap::{Arg, Command};
 use std::error::Error;
 
-
 fn main() -> Result<(), Box<dyn Error>> {
-
     let app = Command::new("anoto_pdf")
         .version("1.0")
         .author("Your Name <your.email@example.com>")
@@ -90,12 +88,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let sect_v = v.get(3).unwrap_or(&"2".to_string()).parse().unwrap_or(2);
 
         let bitmatrix = anoto_pdf::generate_matrix_only(height, width, sect_u, sect_v)?;
-        
+
         // If position is specified, extract 6x6 section
         if let Some(pos) = position {
             anoto_pdf::extract_6x6_section(&bitmatrix, pos)?;
         }
-        
+
         // Save the full matrix
         anoto_pdf::save_generated_matrix(&bitmatrix, height, width, sect_u, sect_v)?;
     }
@@ -103,14 +101,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(values) = matches.get_many::<String>("generate_json") {
         let v: Vec<String> = values.map(|s| s.to_string()).collect();
         let filename = v.first().unwrap_or(&"plot_data.json".to_string()).clone();
-        
+
         let bitmatrix = anoto_pdf::load_matrix_from_json(&filename)?;
-        
+
         // If position is specified, extract 6x6 section
         if let Some(pos) = position {
             anoto_pdf::extract_6x6_section(&bitmatrix, pos)?;
         }
-        
+
         // Save the full matrix
         anoto_pdf::save_matrix_from_json(&bitmatrix, &filename)?;
     }
@@ -118,7 +116,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(values) = matches.get_many::<String>("decode") {
         let v: Vec<String> = values.map(|s| s.to_string()).collect();
         let filename = v.first().unwrap().clone();
-        
+
         let section = anoto_pdf::persist_json::load_6x6_section(&filename)?;
         match anoto_pdf::decode_utils::decode_position(&section) {
             Some((row, col)) => println!("POS ({}, {})", row, col),
