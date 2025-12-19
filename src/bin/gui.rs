@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use anoto_pdf::anoto_matrix::generate_matrix_only;
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
 use anoto_pdf::make_plots::{draw_dot_on_file, draw_dots_on_file, draw_preview_image};

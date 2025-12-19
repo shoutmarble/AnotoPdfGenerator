@@ -1,6 +1,10 @@
-### rust_anoto_dots
+# AnotoPdfGenerator (`anoto_pdf`)
 
-### rust version of [cheind/py-microdots](https://github.com/cheind/py-microdots)
+Rust tooling for working with Anoto-style dot patterns: generate dot matrices, render dot-paper PDFs/PNGs, and decode positions from sampled sections.
+
+- **CLI**: generate matrices, extract 6×6 sections, and decode positions from saved sections.
+- **GUI**: interactive PDF/PNG generation and preview (and a tiny local REST endpoint used by the `curl` tests below).
+- **Reference**: inspired by the Python implementation in [cheind/py-microdots](https://github.com/cheind/py-microdots).
 
 ---
 ![anoto pdf gui](src/assets/anoto_pdf.png)
