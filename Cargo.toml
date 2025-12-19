@@ -1,7 +1,7 @@
 [package]
 name = "anoto_pdf"
 authors = ["Terry McConnell <terry@example.com>"]
-version = "0.6.0"
+version = "0.6.2"
 edition = "2024"
 default-run = "generator_gui"
 
