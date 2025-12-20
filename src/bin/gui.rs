@@ -4,6 +4,7 @@ use anoto_pdf::anoto_matrix::generate_matrix_only;
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
 use anoto_pdf::make_plots::{draw_dot_on_file, draw_dots_on_file, draw_preview_image};
 use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
+use anoto_pdf::persist_json::write_json_grid_rows;
 use iced::widget::image;
 use iced::widget::{
     Action, button, canvas, column, container, row, scrollable, slider, space, text, text_editor,
@@ -1638,6 +1639,28 @@ async fn generate_and_save(
     // we will just run it here. It might block the UI thread if the executor is single threaded.
     // However, for the purpose of this task, we are using Task::perform.
 
+    fn bitmatrix_to_arrow_json(bitmatrix: &ndarray::Array3<i32>) -> Vec<Vec<&'static str>> {
+        let (h, w, _d) = bitmatrix.dim();
+        let mut arrows: Vec<Vec<&'static str>> = Vec::with_capacity(h);
+        for y in 0..h {
+            let mut row_arrows: Vec<&'static str> = Vec::with_capacity(w);
+            for x in 0..w {
+                let b0 = bitmatrix[[y, x, 0]];
+                let b1 = bitmatrix[[y, x, 1]];
+                let arrow = match (b0, b1) {
+                    (0, 0) => "↑",
+                    (1, 0) => "←",
+                    (0, 1) => "→",
+                    (1, 1) => "↓",
+                    _ => "?",
+                };
+                row_arrows.push(arrow);
+            }
+            arrows.push(row_arrows);
+        }
+        arrows
+    }
+
     let result = (|| -> Result<(image::Handle, String, u32, u32), Box<dyn std::error::Error>> {
         let bitmatrix =
             generate_matrix_only(params.height, params.width, params.sect_u, params.sect_v)?;
@@ -1656,6 +1679,13 @@ async fn generate_and_save(
             &format!("{}__X.pdf", base_filename),
             &params.config,
         )?;
+
+        // Also emit Arrow JSON (X)
+        let arrows_x = bitmatrix_to_arrow_json(&bitmatrix);
+        let arrows_x_path = format!("output/{}__X.json", base_filename);
+        let arrows_x_file = std::fs::File::create(&arrows_x_path)?;
+        write_json_grid_rows(arrows_x_file, &arrows_x)?;
+
         let bitmatrix_i8 = bitmatrix.mapv(|x| x as i8);
         let png_path_x = format!("output/{}__X.png", base_filename);
         draw_preview_image(&bitmatrix_i8, &params.config, &png_path_x)?;
@@ -1676,6 +1706,13 @@ async fn generate_and_save(
             &format!("{}__Y.pdf", base_filename),
             &params.config,
         )?;
+
+        // Also emit Arrow JSON (Y, matching the flipped-Y PDF/PNG)
+        let arrows_y = bitmatrix_to_arrow_json(&bitmatrix_y);
+        let arrows_y_path = format!("output/{}__Y.json", base_filename);
+        let arrows_y_file = std::fs::File::create(&arrows_y_path)?;
+        write_json_grid_rows(arrows_y_file, &arrows_y)?;
+
         let bitmatrix_y_i8 = bitmatrix_y.mapv(|x| x as i8);
         let png_path_y = format!("output/{}__Y.png", base_filename);
         draw_preview_image(&bitmatrix_y_i8, &params.config, &png_path_y)?;

@@ -1,7 +1,37 @@
 use ndarray::{Array2, Array3};
+use serde::Serialize;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+
+pub fn write_json_grid_rows<W, T>(mut writer: W, data: &[Vec<T>]) -> Result<(), Box<dyn Error>>
+where
+    W: Write,
+    T: Serialize,
+{
+    writer.write_all(b"[\n")?;
+
+    for (row_index, row) in data.iter().enumerate() {
+        writer.write_all(b"  [")?;
+
+        for (col_index, cell) in row.iter().enumerate() {
+            if col_index > 0 {
+                writer.write_all(b", ")?;
+            }
+            let cell_json = serde_json::to_string(cell)?;
+            writer.write_all(cell_json.as_bytes())?;
+        }
+
+        writer.write_all(b"]")?;
+        if row_index + 1 < data.len() {
+            writer.write_all(b",")?;
+        }
+        writer.write_all(b"\n")?;
+    }
+
+    writer.write_all(b"]\n")?;
+    Ok(())
+}
 
 pub fn save_bitmatrix_text(bitmatrix: &Array3<i8>, filename: &str) -> Result<(), Box<dyn Error>> {
     let mut file = File::create(filename)?;
