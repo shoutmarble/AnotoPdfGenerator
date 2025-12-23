@@ -1,4 +1,6 @@
 use crate::pdf_dotpaper::gen_pdf::PdfConfig;
+use image::codecs::png::PngEncoder;
+use image::{ColorType, ImageEncoder};
 use plotters::prelude::*;
 use std::error::Error;
 
@@ -41,6 +43,12 @@ pub fn draw_preview_image(
     let width = bitmatrix.dim().1;
     let radius_px = (config.dot_size as f64 * scale).max(1.0) as u32;
 
+    // Parse colors once (this used to be done per-dot).
+    let color_up = parse_hex_to_rgb(&config.color_up);
+    let color_down = parse_hex_to_rgb(&config.color_down);
+    let color_left = parse_hex_to_rgb(&config.color_left);
+    let color_right = parse_hex_to_rgb(&config.color_right);
+
     let grid_width = (width as f64 - 1.0) * config.grid_spacing as f64;
     let grid_height = (height as f64 - 1.0) * config.grid_spacing as f64;
 
@@ -54,10 +62,10 @@ pub fn draw_preview_image(
             let dot_type = x_bit + (y_bit << 1);
 
             let color = match dot_type {
-                0 => parse_hex_to_rgb(&config.color_up),
-                1 => parse_hex_to_rgb(&config.color_left),
-                2 => parse_hex_to_rgb(&config.color_right),
-                3 => parse_hex_to_rgb(&config.color_down),
+                0 => color_up,
+                1 => color_left,
+                2 => color_right,
+                3 => color_down,
                 _ => BLACK,
             };
 
@@ -77,6 +85,86 @@ pub fn draw_preview_image(
     }))?;
 
     Ok(())
+}
+
+pub fn draw_preview_image_png_bytes(
+    bitmatrix: &ndarray::Array3<i8>,
+    config: &PdfConfig,
+) -> Result<(Vec<u8>, u32, u32), Box<dyn Error>> {
+    // A4 dimensions in points (1/72 inch)
+    let a4_width_pts = 595.276;
+    let a4_height_pts = 841.89;
+
+    // Scale factor from points to pixels
+    let scale = config.dpi as f64 / 72.0;
+
+    let img_width = (a4_width_pts * scale).ceil() as u32;
+    let img_height = (a4_height_pts * scale).ceil() as u32;
+
+    // RGB buffer for plotters
+    let mut rgb = vec![0u8; (img_width as usize) * (img_height as usize) * 3];
+
+    {
+        let root_area =
+            BitMapBackend::with_buffer(&mut rgb, (img_width, img_height)).into_drawing_area();
+        root_area.fill(&WHITE)?;
+
+        // Use PDF coordinate system: 0..width, 0..height (points)
+        // This assumes PDF origin is bottom-left.
+        let mut chart = ChartBuilder::on(&root_area)
+            .build_cartesian_2d(0f64..a4_width_pts, 0f64..a4_height_pts)?;
+
+        let height = bitmatrix.dim().0;
+        let width = bitmatrix.dim().1;
+        let radius_px = (config.dot_size as f64 * scale).max(1.0) as u32;
+
+        // Parse colors once (this used to be done per-dot).
+        let color_up = parse_hex_to_rgb(&config.color_up);
+        let color_down = parse_hex_to_rgb(&config.color_down);
+        let color_left = parse_hex_to_rgb(&config.color_left);
+        let color_right = parse_hex_to_rgb(&config.color_right);
+
+        let grid_width = (width as f64 - 1.0) * config.grid_spacing as f64;
+        let grid_height = (height as f64 - 1.0) * config.grid_spacing as f64;
+
+        let margin_x = (a4_width_pts - grid_width) / 2.0;
+        let margin_y = (a4_height_pts - grid_height) / 2.0;
+
+        chart.draw_series((0..height).flat_map(move |y| {
+            (0..width).map(move |x| {
+                let x_bit = bitmatrix[[y, x, 0]] as usize;
+                let y_bit = bitmatrix[[y, x, 1]] as usize;
+                let dot_type = x_bit + (y_bit << 1);
+
+                let color = match dot_type {
+                    0 => color_up,
+                    1 => color_left,
+                    2 => color_right,
+                    3 => color_down,
+                    _ => BLACK,
+                };
+
+                let x_pos = margin_x + x as f64 * config.grid_spacing as f64;
+                let y_pos = margin_y + y as f64 * config.grid_spacing as f64;
+
+                let (dx, dy) = match dot_type {
+                    0 => (0.0, config.offset_from_origin as f64),  // Up
+                    1 => (-config.offset_from_origin as f64, 0.0), // Left
+                    2 => (config.offset_from_origin as f64, 0.0),  // Right
+                    3 => (0.0, -config.offset_from_origin as f64), // Down
+                    _ => (0.0, 0.0),
+                };
+
+                Circle::new((x_pos + dx, y_pos + dy), radius_px, color.filled())
+            })
+        }))?;
+    }
+
+    // Encode RGB buffer as PNG
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(&rgb, img_width, img_height, ColorType::Rgb8.into())?;
+    Ok((png, img_width, img_height))
 }
 
 pub fn draw_dot_on_file(

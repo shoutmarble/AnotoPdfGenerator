@@ -2,7 +2,7 @@
 
 use anoto_pdf::anoto_matrix::generate_matrix_only;
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
-use anoto_pdf::make_plots::draw_preview_image;
+use anoto_pdf::make_plots::draw_preview_image_png_bytes;
 use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
 use anoto_pdf::persist_json::write_json_grid_rows;
 use iced::widget::image;
@@ -105,7 +105,8 @@ enum Message {
     SectUChanged(i32),
     SectVChanged(i32),
     GeneratePressed,
-    GenerationFinished(Result<(image::Handle, String, u32, u32), String>),
+    PreviewGenerated(Result<PreviewResult, String>),
+    OutputsFinished(Result<(), String>),
     ToggleUpPicker(bool),
     ToggleDownPicker(bool),
     ToggleLeftPicker(bool),
@@ -142,6 +143,19 @@ enum Message {
     AutoPlotDecoderToggled(bool),
     
     PaneResized(pane_grid::Split, f32),
+}
+
+#[derive(Debug, Clone)]
+struct PreviewResult {
+    handle: image::Handle,
+    png_path_y: String,
+    w_px: u32,
+    h_px: u32,
+    params: GenerationParams,
+    base_filename: String,
+    bitmatrix: std::sync::Arc<ndarray::Array3<i32>>,
+    bitmatrix_y: std::sync::Arc<ndarray::Array3<i32>>,
+    y_png_bytes: std::sync::Arc<Vec<u8>>,
 }
 
 fn pretty_print_points_by_row(points: &[(i64, i64)]) -> String {
@@ -239,7 +253,7 @@ impl Default for Gui {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct GenerationParams {
     height: usize,
     width: usize,
@@ -799,7 +813,7 @@ impl Gui {
             Message::GeneratePressed => {
                 if !self.is_generating {
                     self.is_generating = true;
-                    self.status_message = "Generating PDF...".to_string();
+                    self.status_message = "Generating preview...".to_string();
                     let params = GenerationParams {
                         height: self.height,
                         width: self.width,
@@ -808,27 +822,39 @@ impl Gui {
                         config: self.config.clone(),
                     };
                     return Task::perform(
-                        async move { generate_and_save(params).await },
-                        Message::GenerationFinished,
+                        async move { generate_preview(params).await },
+                        Message::PreviewGenerated,
                     );
                 }
             }
-            Message::GenerationFinished(result) => {
+            Message::PreviewGenerated(result) => match result {
+                Ok(preview) => {
+                    self.status_message = "Preview ready; generating outputs...".to_string();
+                    self.generated_image_handle = Some(preview.handle.clone());
+                    self.current_png_path = Some(preview.png_path_y.clone());
+                    self.image_width = preview.w_px;
+                    self.image_height = preview.h_px;
+                    self.preview_zoom = 1.0;
+                    self.preview_pan = Vector::new(0.0, 0.0);
+
+                    // New base image => clear fast overlay.
+                    self.overlay_points.clear();
+                    self.overlay_seen.clear();
+
+                    return Task::perform(
+                        async move { generate_outputs(preview).await },
+                        Message::OutputsFinished,
+                    );
+                }
+                Err(e) => {
+                    self.is_generating = false;
+                    self.status_message = format!("Error: {}", e);
+                }
+            },
+            Message::OutputsFinished(result) => {
                 self.is_generating = false;
                 match result {
-                    Ok((handle, path, w, h)) => {
-                        self.status_message = "PDF Generated Successfully!".to_string();
-                        self.generated_image_handle = Some(handle);
-                        self.current_png_path = Some(path);
-                        self.image_width = w;
-                        self.image_height = h;
-                        self.preview_zoom = 1.0;
-                        self.preview_pan = Vector::new(0.0, 0.0);
-
-                        // New base image => clear fast overlay.
-                        self.overlay_points.clear();
-                        self.overlay_seen.clear();
-                    }
+                    Ok(()) => self.status_message = "PDF Generated Successfully!".to_string(),
                     Err(e) => self.status_message = format!("Error: {}", e),
                 }
             }
@@ -1863,40 +1889,33 @@ const INDEX_HTML: &str = r#"
 </html>
 "#;
 
-async fn generate_and_save(
-    params: GenerationParams,
-) -> Result<(image::Handle, String, u32, u32), String> {
-    // This is a blocking operation, but we run it in an async block.
-    // In a real async runtime, we should use spawn_blocking.
-    // Since we don't have easy access to spawn_blocking without adding tokio dependency explicitly,
-    // we will just run it here. It might block the UI thread if the executor is single threaded.
-    // However, for the purpose of this task, we are using Task::perform.
-
-    fn bitmatrix_to_arrow_json(bitmatrix: &ndarray::Array3<i32>) -> Vec<Vec<&'static str>> {
-        let (h, w, _d) = bitmatrix.dim();
-        let mut arrows: Vec<Vec<&'static str>> = Vec::with_capacity(h);
-        for y in 0..h {
-            let mut row_arrows: Vec<&'static str> = Vec::with_capacity(w);
-            for x in 0..w {
-                let b0 = bitmatrix[[y, x, 0]];
-                let b1 = bitmatrix[[y, x, 1]];
-                let arrow = match (b0, b1) {
-                    (0, 0) => "↑",
-                    (1, 0) => "←",
-                    (0, 1) => "→",
-                    (1, 1) => "↓",
-                    _ => "?",
-                };
-                row_arrows.push(arrow);
-            }
-            arrows.push(row_arrows);
+fn bitmatrix_to_arrow_json(bitmatrix: &ndarray::Array3<i32>) -> Vec<Vec<&'static str>> {
+    let (h, w, _d) = bitmatrix.dim();
+    let mut arrows: Vec<Vec<&'static str>> = Vec::with_capacity(h);
+    for y in 0..h {
+        let mut row_arrows: Vec<&'static str> = Vec::with_capacity(w);
+        for x in 0..w {
+            let b0 = bitmatrix[[y, x, 0]];
+            let b1 = bitmatrix[[y, x, 1]];
+            let arrow = match (b0, b1) {
+                (0, 0) => "↑",
+                (1, 0) => "←",
+                (0, 1) => "→",
+                (1, 1) => "↓",
+                _ => "?",
+            };
+            row_arrows.push(arrow);
         }
-        arrows
+        arrows.push(row_arrows);
     }
+    arrows
+}
 
-    let result = (|| -> Result<(image::Handle, String, u32, u32), Box<dyn std::error::Error>> {
+async fn generate_preview(params: GenerationParams) -> Result<PreviewResult, String> {
+    let result = (|| -> Result<PreviewResult, Box<dyn std::error::Error>> {
         let bitmatrix =
             generate_matrix_only(params.height, params.width, params.sect_u, params.sect_v)?;
+
         let base_filename = format!(
             "GUI_G__{}__{}__{}__{}",
             params.height, params.width, params.sect_u, params.sect_v
@@ -1906,24 +1925,7 @@ async fn generate_and_save(
             std::fs::create_dir("output")?;
         }
 
-        // Generate X (normal) PDF/PNG
-        gen_pdf_from_matrix_data(
-            &bitmatrix,
-            &format!("{}__X.pdf", base_filename),
-            &params.config,
-        )?;
-
-        // Also emit Arrow JSON (X) — requested suffix swap: X data saved as __Y.json
-        let arrows_x = bitmatrix_to_arrow_json(&bitmatrix);
-        let arrows_x_path = format!("output/{}__Y.json", base_filename);
-        let arrows_x_file = std::fs::File::create(&arrows_x_path)?;
-        write_json_grid_rows(arrows_x_file, &arrows_x)?;
-
-        let bitmatrix_i8 = bitmatrix.mapv(|x| x as i8);
-        let png_path_x = format!("output/{}__X.png", base_filename);
-        draw_preview_image(&bitmatrix_i8, &params.config, &png_path_x)?;
-
-        // Generate Y (Y-axis flipped) PDF/PNG
+        // Generate the Y-flipped matrix for the default preview.
         let (h, w, d) = bitmatrix.dim();
         let mut bitmatrix_y = bitmatrix.clone();
         for y in 0..h {
@@ -1934,31 +1936,99 @@ async fn generate_and_save(
             }
         }
 
-        gen_pdf_from_matrix_data(
-            &bitmatrix_y,
-            &format!("{}__Y.pdf", base_filename),
-            &params.config,
-        )?;
+        // Render the Y preview in-memory and return immediately so the UI can update.
+        let bitmatrix_y_i8 = bitmatrix_y.mapv(|x| x as i8);
+        let png_path_y = format!("output/{}__Y.png", base_filename);
+        let (y_png_bytes, w_px, h_px) = draw_preview_image_png_bytes(&bitmatrix_y_i8, &params.config)?;
 
-        // Also emit Arrow JSON (Y, matching the flipped-Y PDF/PNG) — requested suffix swap: Y data saved as __X.json
-        let arrows_y = bitmatrix_to_arrow_json(&bitmatrix_y);
+        let handle = image::Handle::from_bytes(y_png_bytes.clone());
+        let bitmatrix = std::sync::Arc::new(bitmatrix);
+        let bitmatrix_y = std::sync::Arc::new(bitmatrix_y);
+        let y_png_bytes = std::sync::Arc::new(y_png_bytes);
+
+        Ok(PreviewResult {
+            handle,
+            png_path_y,
+            w_px,
+            h_px,
+            params,
+            base_filename,
+            bitmatrix,
+            bitmatrix_y,
+            y_png_bytes,
+        })
+    })();
+
+    result.map_err(|e| e.to_string())
+}
+
+async fn generate_outputs(preview: PreviewResult) -> Result<(), String> {
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let base_filename = preview.base_filename;
+        let config = preview.params.config;
+
+        // Arrow JSON (suffix swap requested previously):
+        let arrows_x = bitmatrix_to_arrow_json(preview.bitmatrix.as_ref());
+        let arrows_y = bitmatrix_to_arrow_json(preview.bitmatrix_y.as_ref());
+
+        let arrows_x_path = format!("output/{}__Y.json", base_filename);
+        let arrows_x_file = std::fs::File::create(&arrows_x_path)?;
+        write_json_grid_rows(arrows_x_file, &arrows_x)?;
+
         let arrows_y_path = format!("output/{}__X.json", base_filename);
         let arrows_y_file = std::fs::File::create(&arrows_y_path)?;
         write_json_grid_rows(arrows_y_file, &arrows_y)?;
 
-        let bitmatrix_y_i8 = bitmatrix_y.mapv(|x| x as i8);
-        let png_path_y = format!("output/{}__Y.png", base_filename);
-        draw_preview_image(&bitmatrix_y_i8, &params.config, &png_path_y)?;
+        let pdf_x_name = format!("{}__X.pdf", base_filename);
+        let pdf_y_name = format!("{}__Y.pdf", base_filename);
 
-        // Load Y image bytes to force refresh in UI (Y is the default preview)
-        let bytes = std::fs::read(&png_path_y)?;
-        let img = ::image::load_from_memory(&bytes)?;
-        Ok((
-            image::Handle::from_bytes(bytes),
-            png_path_y,
-            img.width(),
-            img.height(),
-        ))
+        let png_path_x = format!("output/{}__X.png", base_filename);
+        let png_path_y = format!("output/{}__Y.png", base_filename);
+
+        let bitmatrix_x = preview.bitmatrix;
+        let bitmatrix_y = preview.bitmatrix_y;
+        let y_png_bytes = preview.y_png_bytes;
+
+        // Basic parallelism: X outputs and Y outputs are independent.
+        let error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        std::thread::scope(|s| {
+            let error_x = error.clone();
+            let error_y = error.clone();
+            let config_x = config.clone();
+            let config_y = config.clone();
+
+            s.spawn(move || {
+                if let Err(e) = (|| -> Result<(), Box<dyn std::error::Error>> {
+                    gen_pdf_from_matrix_data(bitmatrix_x.as_ref(), &pdf_x_name, &config_x)?;
+
+                    let bitmatrix_i8 = bitmatrix_x.as_ref().mapv(|x| x as i8);
+                    let (png_bytes_x, _w, _h) =
+                        draw_preview_image_png_bytes(&bitmatrix_i8, &config_x)?;
+                    std::fs::write(&png_path_x, &png_bytes_x)?;
+
+                    Ok(())
+                })() {
+                    *error_x.lock().unwrap() = Some(e.to_string());
+                }
+            });
+
+            s.spawn(move || {
+                if let Err(e) = (|| -> Result<(), Box<dyn std::error::Error>> {
+                    gen_pdf_from_matrix_data(bitmatrix_y.as_ref(), &pdf_y_name, &config_y)?;
+                    std::fs::write(&png_path_y, y_png_bytes.as_ref())?;
+                    Ok(())
+                })() {
+                    *error_y.lock().unwrap() = Some(e.to_string());
+                }
+            });
+        });
+
+        if let Some(e) = error.lock().unwrap().take() {
+            return Err(e.into());
+        }
+
+        Ok(())
     })();
 
     result.map_err(|e| e.to_string())

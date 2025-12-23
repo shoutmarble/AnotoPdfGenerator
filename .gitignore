@@ -28,6 +28,7 @@ target/
 Cargo.lock
 
 # Generated files
+output/
 *.png
 !src/assets/*.png
 anoto_dots.png
