@@ -1804,9 +1804,9 @@ async fn generate_and_save(
             &params.config,
         )?;
 
-        // Also emit Arrow JSON (X)
+        // Also emit Arrow JSON (X) — requested suffix swap: X data saved as __Y.json
         let arrows_x = bitmatrix_to_arrow_json(&bitmatrix);
-        let arrows_x_path = format!("output/{}__X.json", base_filename);
+        let arrows_x_path = format!("output/{}__Y.json", base_filename);
         let arrows_x_file = std::fs::File::create(&arrows_x_path)?;
         write_json_grid_rows(arrows_x_file, &arrows_x)?;
 
@@ -1831,9 +1831,9 @@ async fn generate_and_save(
             &params.config,
         )?;
 
-        // Also emit Arrow JSON (Y, matching the flipped-Y PDF/PNG)
+        // Also emit Arrow JSON (Y, matching the flipped-Y PDF/PNG) — requested suffix swap: Y data saved as __X.json
         let arrows_y = bitmatrix_to_arrow_json(&bitmatrix_y);
-        let arrows_y_path = format!("output/{}__Y.json", base_filename);
+        let arrows_y_path = format!("output/{}__X.json", base_filename);
         let arrows_y_file = std::fs::File::create(&arrows_y_path)?;
         write_json_grid_rows(arrows_y_file, &arrows_y)?;
 
