@@ -10,6 +10,7 @@ use iced::widget::{
     Action, button, canvas, column, container, row, scrollable, slider, space, text, text_editor,
     text_input,
 };
+use iced::widget::pane_grid;
 use iced::{
     Border, Color, Element, Length, Point, Rectangle, Renderer, Shadow, Task, Theme, Vector, mouse,
 };
@@ -60,6 +61,7 @@ struct Gui {
     lookup_sect_v: String,
     lookup_x: String,
     lookup_y: String,
+    lookup_size: f32,
     lookup_result: text_editor::Content,
     draw_x: String,
     draw_y: String,
@@ -72,6 +74,16 @@ struct Gui {
     points_input: text_editor::Content,
     points_status: String,
     seen_points: HashSet<(i64, i64)>,
+
+    panes: pane_grid::State<PaneKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneKind {
+    Preview,
+    Controls,
+    Tools,
+    Rest,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +120,7 @@ enum Message {
     LookupSectVChanged(String),
     LookupXChanged(String),
     LookupYChanged(String),
+    LookupSizeChanged(f32),
     PerformLookup,
     LookupResultChanged(text_editor::Action),
     DrawXChanged(String),
@@ -119,10 +132,22 @@ enum Message {
     PointsInputChanged(text_editor::Action),
     PlotAllPoints,
     PlotAllPointsFinished(Result<image::Handle, String>),
+    PaneResized(pane_grid::Split, f32),
 }
 
 impl Default for Gui {
     fn default() -> Self {
+        let (mut panes, preview_pane) = pane_grid::State::new(PaneKind::Preview);
+        let (controls_pane, _) = panes
+            .split(pane_grid::Axis::Vertical, preview_pane, PaneKind::Controls)
+            .expect("split preview->controls");
+        let (tools_pane, _) = panes
+            .split(pane_grid::Axis::Vertical, controls_pane, PaneKind::Tools)
+            .expect("split controls->tools");
+        let (_rest_pane, _) = panes
+            .split(pane_grid::Axis::Vertical, tools_pane, PaneKind::Rest)
+            .expect("split tools->rest");
+
         Self {
             config: PdfConfig::default(),
             height: 9,
@@ -149,6 +174,7 @@ impl Default for Gui {
             lookup_sect_v: "10".to_string(),
             lookup_x: "0".to_string(),
             lookup_y: "0".to_string(),
+            lookup_size: 6.0,
             lookup_result: text_editor::Content::new(),
             draw_x: "0".to_string(),
             draw_y: "0".to_string(),
@@ -161,6 +187,8 @@ impl Default for Gui {
             points_input: text_editor::Content::new(),
             points_status: "Ready".to_string(),
             seen_points: HashSet::new(),
+
+            panes,
         }
     }
 }
@@ -616,6 +644,11 @@ impl Gui {
                     self.lookup_y = val;
                 }
             }
+            Message::LookupSizeChanged(val) => {
+                // Keep integer sizes in [6, 100]
+                let clamped = val.clamp(6.0, 100.0).round();
+                self.lookup_size = clamped;
+            }
             Message::LookupResultChanged(action) => {
                 self.lookup_result.perform(action);
             }
@@ -625,6 +658,7 @@ impl Gui {
                     &self.lookup_sect_v,
                     &self.lookup_x,
                     &self.lookup_y,
+                    self.lookup_size as usize,
                 );
                 self.lookup_result = text_editor::Content::with_text(&res);
             }
@@ -806,6 +840,9 @@ impl Gui {
             Message::PreviewPanned(delta, viewport) => {
                 self.pan_by(delta, viewport);
             }
+            Message::PaneResized(split, ratio) => {
+                self.panes.resize(split, ratio);
+            }
         }
         Task::none()
     }
@@ -822,405 +859,456 @@ impl Gui {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let scale_slider = container(
-            column![
-                text(format!("UI Scale: {:.1}", self.ui_scale)),
-                slider(0.5..=3.0, self.ui_scale, Message::UiScaleChanged).step(0.1)
-            ]
-            .spacing(10),
-        )
-        .padding(10)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 1.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        });
-
-        let dpi_slider = container(
-            column![
-                text(format!("PDF DPI: {:.0}", self.config.dpi)),
-                slider(300.0..=1200.0, self.config.dpi, Message::DpiChanged).step(10.0)
-            ]
-            .spacing(10),
-        )
-        .padding(10)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 1.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        });
-
-        let anoto_ctrl = anoto_control::anoto_control(
-            &self.control_state,
-            self.config.dot_size,
-            self.config.grid_spacing,
-            self.config.offset_from_origin,
-            hex_to_color(&self.config.color_up),
-            hex_to_color(&self.config.color_down),
-            hex_to_color(&self.config.color_left),
-            hex_to_color(&self.config.color_right),
-            Message::ToggleUpPicker,
-            Message::ToggleDownPicker,
-            Message::ToggleLeftPicker,
-            Message::ToggleRightPicker,
-            Message::ColorUpPicked,
-            Message::ColorDownPicked,
-            Message::ColorLeftPicked,
-            Message::ColorRightPicked,
-            Message::DotSizeChanged,
-            Message::SpacingChanged,
-            Message::OffsetChanged,
-        );
-
-        let page_layout = page_layout_control::page_layout_control(
-            &self.page_layout_state,
-            self.width,
-            self.height,
-            Message::WidthChanged,
-            Message::HeightChanged,
-            Message::AutodetectChanged,
-        );
-
-        let section_ctrl = section_control::section_control(
-            self.sect_u,
-            self.sect_v,
-            Message::SectUChanged,
-            Message::SectVChanged,
-        );
-
-        let matrix_inputs =
-            column![text("Matrix Settings:"), page_layout, section_ctrl,].spacing(10);
-
-        let generate_btn = if self.is_generating {
-            row![
-                button("Generating...").width(Length::Fill),
-                Spinner::new()
-                    .width(Length::Fixed(20.0))
-                    .height(Length::Fixed(20.0)),
-            ]
-            .spacing(10)
-        } else {
-            row![
-                button("Generate PDF")
-                    .on_press(Message::GeneratePressed)
-                    .width(Length::Fill)
-            ]
-        };
-
-        let controls = column![
-            text("Anoto PDF Generator").size(30),
-            space().height(Length::Fixed(20.0)),
-            scale_slider,
-            space().height(Length::Fixed(20.0)),
-            dpi_slider,
-            space().height(Length::Fixed(20.0)),
-            anoto_ctrl,
-            space().height(Length::Fixed(20.0)),
-            matrix_inputs,
-            space().height(Length::Fixed(20.0)),
-            generate_btn,
-            space().height(Length::Fixed(10.0)),
-            text(&self.status_message),
-        ]
-        .spacing(10)
-        .padding(20)
-        .width(Length::Fixed(460.0));
-
-        let image_preview = if let Some(handle) = &self.generated_image_handle {
-            container(
+        let preview_pane = || -> Element<'_, Message> {
+            if let Some(handle) = &self.generated_image_handle {
                 container(
-                    canvas::Canvas::new(ImageViewer {
-                        handle,
-                        zoom: self.preview_zoom,
-                        pan: self.preview_pan,
-                        image_size: (self.image_width as f32, self.image_height as f32),
-                    })
+                    container(
+                        canvas::Canvas::new(ImageViewer {
+                            handle,
+                            zoom: self.preview_zoom,
+                            pan: self.preview_pan,
+                            image_size: (self.image_width as f32, self.image_height as f32),
+                        })
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    )
                     .width(Length::Fill)
-                    .height(Length::Fill),
+                    .height(Length::Fill)
+                    .padding(5)
+                    .style(|_theme| container::Style {
+                        border: Border {
+                            color: Color::from_rgb(0.2, 0.2, 0.2),
+                            width: 5.0,
+                            radius: 10.0.into(),
+                        },
+                        background: Some(Color::from_rgb(0.95, 0.95, 0.95).into()),
+                        shadow: Shadow {
+                            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                            offset: iced::Vector::new(5.0, 5.0),
+                            blur_radius: 10.0,
+                        },
+                        ..container::Style::default()
+                    }),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .padding(5)
-                .style(|_theme| container::Style {
-                    border: Border {
-                        color: Color::from_rgb(0.2, 0.2, 0.2),
-                        width: 5.0,
-                        radius: 10.0.into(),
-                    },
-                    background: Some(Color::from_rgb(0.95, 0.95, 0.95).into()),
-                    shadow: Shadow {
-                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
-                        offset: iced::Vector::new(5.0, 5.0),
-                        blur_radius: 10.0,
-                    },
-                    ..container::Style::default()
-                }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(10)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-        } else {
-            container(text("No image generated yet").size(20))
-                .width(Length::Fill)
-                .height(Length::Fill)
+                .padding(10)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
+                .into()
+            } else {
+                container(text("No image generated yet").size(20))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into()
+            }
         };
 
-        let server_controls = container(
-            column![
-                text("Web Server").size(20),
-                space().height(Length::Fixed(10.0)),
+        let controls_pane = || -> Element<'_, Message> {
+            let scale_slider = container(
+                column![
+                    text(format!("UI Scale: {:.1}", self.ui_scale)),
+                    slider(0.5..=3.0, self.ui_scale, Message::UiScaleChanged).step(0.1)
+                ]
+                .spacing(10),
+            )
+            .padding(10)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 1.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            });
+
+            let dpi_slider = container(
+                column![
+                    text(format!("PDF DPI: {:.0}", self.config.dpi)),
+                    slider(300.0..=1200.0, self.config.dpi, Message::DpiChanged).step(10.0)
+                ]
+                .spacing(10),
+            )
+            .padding(10)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 1.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            });
+
+            let anoto_ctrl = anoto_control::anoto_control(
+                &self.control_state,
+                self.config.dot_size,
+                self.config.grid_spacing,
+                self.config.offset_from_origin,
+                hex_to_color(&self.config.color_up),
+                hex_to_color(&self.config.color_down),
+                hex_to_color(&self.config.color_left),
+                hex_to_color(&self.config.color_right),
+                Message::ToggleUpPicker,
+                Message::ToggleDownPicker,
+                Message::ToggleLeftPicker,
+                Message::ToggleRightPicker,
+                Message::ColorUpPicked,
+                Message::ColorDownPicked,
+                Message::ColorLeftPicked,
+                Message::ColorRightPicked,
+                Message::DotSizeChanged,
+                Message::SpacingChanged,
+                Message::OffsetChanged,
+            );
+
+            let page_layout = page_layout_control::page_layout_control(
+                &self.page_layout_state,
+                self.width,
+                self.height,
+                Message::WidthChanged,
+                Message::HeightChanged,
+                Message::AutodetectChanged,
+            );
+
+            let section_ctrl = section_control::section_control(
+                self.sect_u,
+                self.sect_v,
+                Message::SectUChanged,
+                Message::SectVChanged,
+            );
+
+            let matrix_inputs =
+                column![text("Matrix Settings:"), page_layout, section_ctrl,].spacing(10);
+
+            let generate_btn = if self.is_generating {
                 row![
-                    text("Port: "),
-                    text_input("8080", &self.server_port)
-                        .on_input(Message::ServerPortChanged)
-                        .padding(5)
-                        .width(Length::Fixed(80.0))
+                    button("Generating...").width(Length::Fill),
+                    Spinner::new()
+                        .width(Length::Fixed(20.0))
+                        .height(Length::Fixed(20.0)),
                 ]
                 .spacing(10)
-                .align_y(iced::Alignment::Center),
-                space().height(Length::Fixed(10.0)),
-                button(if self.server_shutdown_tx.is_some() {
-                    "Stop Server"
-                } else {
-                    "Start Server"
-                })
-                .on_press(Message::ToggleServer)
-                .padding(10)
-                .width(Length::Fill),
-                space().height(Length::Fixed(10.0)),
-                text(&self.server_status_text).size(14).color(
-                    if self.server_shutdown_tx.is_some() {
-                        Color::from_rgb(0.0, 0.8, 0.0)
-                    } else {
-                        Color::from_rgb(0.8, 0.0, 0.0)
-                    }
-                ),
-            ]
-            .spacing(10),
-        )
-        .padding(20)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 2.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .width(Length::Fixed(200.0));
-
-        let decoder_controls = container(
-            column![
-                text("Decoder").size(20),
-                space().height(Length::Fixed(10.0)),
-                text_editor(&self.json_input)
-                    .on_action(Message::JsonInputChanged)
-                    .height(Length::Fixed(200.0))
-                    .font(iced::font::Font::MONOSPACE)
-                    .wrapping(iced::widget::text::Wrapping::None),
-                space().height(Length::Fixed(10.0)),
-                button("Decode Position")
-                    .on_press(Message::DecodeJson)
-                    .padding(10)
-                    .width(Length::Fill),
-                space().height(Length::Fixed(10.0)),
-                text(&self.decoded_result).size(14),
-            ]
-            .spacing(10),
-        )
-        .padding(20)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 2.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .width(Length::Fixed(200.0));
-
-        let lookup_controls = container(
-            column![
-                text("Pattern Lookup").size(20),
-                space().height(Length::Fixed(10.0)),
+            } else {
                 row![
-                    column![
-                        text("Sect U"),
-                        text_input("10", &self.lookup_sect_u)
-                            .on_input(Message::LookupSectUChanged)
-                            .padding(5)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill),
-                    column![
-                        text("Sect V"),
-                        text_input("10", &self.lookup_sect_v)
-                            .on_input(Message::LookupSectVChanged)
-                            .padding(5)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill)
+                    button("Generate PDF")
+                        .on_press(Message::GeneratePressed)
+                        .width(Length::Fill)
                 ]
-                .spacing(10),
-                row![
-                    column![
-                        text("X"),
-                        text_input("0", &self.lookup_x)
-                            .on_input(Message::LookupXChanged)
-                            .padding(5)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill),
-                    column![
-                        text("Y"),
-                        text_input("0", &self.lookup_y)
-                            .on_input(Message::LookupYChanged)
-                            .padding(5)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill)
-                ]
-                .spacing(10),
-                space().height(Length::Fixed(10.0)),
-                button("Lookup Pattern")
-                    .on_press(Message::PerformLookup)
-                    .padding(10)
-                    .width(Length::Fill),
-                space().height(Length::Fixed(10.0)),
-                text_editor(&self.lookup_result)
-                    .on_action(Message::LookupResultChanged)
-                    .height(Length::Fixed(200.0))
-                    .font(iced::font::Font::MONOSPACE)
-                    .wrapping(iced::widget::text::Wrapping::None),
-            ]
-            .spacing(10),
-        )
-        .padding(20)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 2.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .width(Length::Fixed(200.0));
+            };
 
-        let draw_dot_controls = container(
-            column![
-                text("Draw Dot").size(20),
-                space().height(Length::Fixed(10.0)),
-                row![
-                    column![
-                        text("Position X:"),
-                        text_input("0", &self.draw_x)
-                            .on_input(Message::DrawXChanged)
-                            .padding(5)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill),
-                    column![
-                        text("Position Y:"),
-                        text_input("0", &self.draw_y)
-                            .on_input(Message::DrawYChanged)
-                            .padding(5)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill)
-                ]
-                .spacing(10),
-                space().height(Length::Fixed(10.0)),
-                button("Draw Dot")
-                    .on_press(Message::DrawDotPressed)
-                    .padding(10)
-                    .width(Length::Fill),
-                space().height(Length::Fixed(10.0)),
-                text(&self.draw_status).size(14),
-            ]
-            .spacing(10),
-        )
-        .padding(20)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 2.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .width(Length::Fixed(200.0));
-
-        let rest_post_controls = container(
-            column![
-                text("JSON 6x6+ REST Listener").size(20),
-                space().height(Length::Fixed(10.0)),
-                text_editor(&self.rest_post_content)
-                    .on_action(Message::RestPostContentChanged)
-                    .height(Length::Fixed(300.0))
-                    .font(iced::font::Font::MONOSPACE)
-                    .wrapping(iced::widget::text::Wrapping::None),
-                space().height(Length::Fixed(10.0)),
-                text("Ready to decode").size(14),
+            let controls = column![
+                text("Anoto PDF Generator").size(30),
                 space().height(Length::Fixed(20.0)),
-                text("(X,Y) Decoder").size(20),
-                text_editor(&self.points_input)
-                    .on_action(Message::PointsInputChanged)
-                    .height(Length::Fixed(150.0))
-                    .font(iced::font::Font::MONOSPACE),
-                button("Plot on A4")
-                    .on_press(Message::PlotAllPoints)
+                scale_slider,
+                space().height(Length::Fixed(20.0)),
+                dpi_slider,
+                space().height(Length::Fixed(20.0)),
+                anoto_ctrl,
+                space().height(Length::Fixed(20.0)),
+                matrix_inputs,
+                space().height(Length::Fixed(20.0)),
+                generate_btn,
+                space().height(Length::Fixed(10.0)),
+                text(&self.status_message),
+            ]
+            .spacing(10)
+            .padding(20)
+            .width(Length::Fill);
+
+            scrollable(controls)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+
+        let tools_pane = || -> Element<'_, Message> {
+            let server_controls = container(
+                column![
+                    text("Web Server").size(20),
+                    space().height(Length::Fixed(10.0)),
+                    row![
+                        text("Port: "),
+                        text_input("8080", &self.server_port)
+                            .on_input(Message::ServerPortChanged)
+                            .padding(5)
+                            .width(Length::Fixed(80.0))
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                    space().height(Length::Fixed(10.0)),
+                    button(if self.server_shutdown_tx.is_some() {
+                        "Stop Server"
+                    } else {
+                        "Start Server"
+                    })
+                    .on_press(Message::ToggleServer)
                     .padding(10)
                     .width(Length::Fill),
-                text(&self.points_status).size(14),
+                    space().height(Length::Fixed(10.0)),
+                    text(&self.server_status_text).size(14).color(
+                        if self.server_shutdown_tx.is_some() {
+                            Color::from_rgb(0.0, 0.8, 0.0)
+                        } else {
+                            Color::from_rgb(0.8, 0.0, 0.0)
+                        }
+                    ),
+                ]
+                .spacing(10),
+            )
+            .padding(20)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 2.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .width(Length::Fill);
+
+            let decoder_controls = container(
+                column![
+                    text("Decoder").size(20),
+                    space().height(Length::Fixed(10.0)),
+                    text_editor(&self.json_input)
+                        .on_action(Message::JsonInputChanged)
+                        .height(Length::Fixed(200.0))
+                        .font(iced::font::Font::MONOSPACE)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    space().height(Length::Fixed(10.0)),
+                    button("Decode Position")
+                        .on_press(Message::DecodeJson)
+                        .padding(10)
+                        .width(Length::Fill),
+                    space().height(Length::Fixed(10.0)),
+                    text(&self.decoded_result).size(14),
+                ]
+                .spacing(10),
+            )
+            .padding(20)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 2.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .width(Length::Fill);
+
+            let lookup_controls = container(
+                column![
+                    text("Pattern Lookup").size(20),
+                    space().height(Length::Fixed(10.0)),
+                    row![
+                        column![
+                            text("Sect U"),
+                            text_input("10", &self.lookup_sect_u)
+                                .on_input(Message::LookupSectUChanged)
+                                .padding(5)
+                                .width(Length::Fill)
+                        ]
+                        .spacing(5)
+                        .width(Length::Fill),
+                        column![
+                            text("Sect V"),
+                            text_input("10", &self.lookup_sect_v)
+                                .on_input(Message::LookupSectVChanged)
+                                .padding(5)
+                                .width(Length::Fill)
+                        ]
+                        .spacing(5)
+                        .width(Length::Fill)
+                    ]
+                    .spacing(10),
+                    row![
+                        column![
+                            text("X"),
+                            text_input("0", &self.lookup_x)
+                                .on_input(Message::LookupXChanged)
+                                .padding(5)
+                                .width(Length::Fill)
+                        ]
+                        .spacing(5)
+                        .width(Length::Fill),
+                        column![
+                            text("Y"),
+                            text_input("0", &self.lookup_y)
+                                .on_input(Message::LookupYChanged)
+                                .padding(5)
+                                .width(Length::Fill)
+                        ]
+                        .spacing(5)
+                        .width(Length::Fill)
+                    ]
+                    .spacing(10),
+                    column![
+                        text(format!(
+                            "Matrix Size: {}x{}",
+                            self.lookup_size as u32,
+                            self.lookup_size as u32
+                        )),
+                        slider(6.0..=100.0, self.lookup_size, Message::LookupSizeChanged)
+                            .step(1.0)
+                    ]
+                    .spacing(5),
+                    space().height(Length::Fixed(10.0)),
+                    button("Lookup Pattern")
+                        .on_press(Message::PerformLookup)
+                        .padding(10)
+                        .width(Length::Fill),
+                    space().height(Length::Fixed(10.0)),
+                    {
+                        let size_text = format!(
+                            "{}x{}",
+                            self.lookup_size as u32,
+                            self.lookup_size as u32
+                        );
+                        text_input("", &size_text)
+                            .padding(5)
+                            .width(Length::Fill)
+                    },
+                    text_editor(&self.lookup_result)
+                        .on_action(Message::LookupResultChanged)
+                        .height(Length::Fixed(200.0))
+                        .font(iced::font::Font::MONOSPACE)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .spacing(10),
+            )
+            .padding(20)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 2.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .width(Length::Fill);
+
+            let draw_dot_controls = container(
+                column![
+                    text("Draw Dot").size(20),
+                    space().height(Length::Fixed(10.0)),
+                    row![
+                        column![
+                            text("Position X:"),
+                            text_input("0", &self.draw_x)
+                                .on_input(Message::DrawXChanged)
+                                .padding(5)
+                                .width(Length::Fill)
+                        ]
+                        .spacing(5)
+                        .width(Length::Fill),
+                        column![
+                            text("Position Y:"),
+                            text_input("0", &self.draw_y)
+                                .on_input(Message::DrawYChanged)
+                                .padding(5)
+                                .width(Length::Fill)
+                        ]
+                        .spacing(5)
+                        .width(Length::Fill)
+                    ]
+                    .spacing(10),
+                    space().height(Length::Fixed(10.0)),
+                    button("Draw Dot")
+                        .on_press(Message::DrawDotPressed)
+                        .padding(10)
+                        .width(Length::Fill),
+                    space().height(Length::Fixed(10.0)),
+                    text(&self.draw_status).size(14),
+                ]
+                .spacing(10),
+            )
+            .padding(20)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 2.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .width(Length::Fill);
+
+            let right_column = column![
+                server_controls,
+                space().height(Length::Fixed(20.0)),
+                decoder_controls,
+                space().height(Length::Fixed(20.0)),
+                lookup_controls,
+                space().height(Length::Fixed(20.0)),
+                draw_dot_controls
             ]
-            .spacing(10),
-        )
-        .padding(20)
-        .style(|_theme| container::Style {
-            border: Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 2.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .width(Length::Fixed(250.0));
+            .padding(20);
 
-        let right_column = column![
-            server_controls,
-            space().height(Length::Fixed(20.0)),
-            decoder_controls,
-            space().height(Length::Fixed(20.0)),
-            lookup_controls,
-            space().height(Length::Fixed(20.0)),
-            draw_dot_controls
-        ]
-        .padding(20);
+            scrollable(right_column)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
 
-        let new_column = column![rest_post_controls].padding(20);
+        let rest_pane = || -> Element<'_, Message> {
+            let rest_post_controls = container(
+                column![
+                    text("JSON 6x6+ REST Listener").size(20),
+                    space().height(Length::Fixed(10.0)),
+                    text_editor(&self.rest_post_content)
+                        .on_action(Message::RestPostContentChanged)
+                        .height(Length::Fixed(300.0))
+                        .font(iced::font::Font::MONOSPACE)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    space().height(Length::Fixed(10.0)),
+                    text("Ready to decode").size(14),
+                    space().height(Length::Fixed(20.0)),
+                    text("(X,Y) Decoder").size(20),
+                    text_editor(&self.points_input)
+                        .on_action(Message::PointsInputChanged)
+                        .height(Length::Fixed(150.0))
+                        .font(iced::font::Font::MONOSPACE),
+                    button("Plot on A4")
+                        .on_press(Message::PlotAllPoints)
+                        .padding(10)
+                        .width(Length::Fill),
+                    text(&self.points_status).size(14),
+                ]
+                .spacing(10),
+            )
+            .padding(20)
+            .style(|_theme| container::Style {
+                border: Border {
+                    color: Color::from_rgb(0.5, 0.5, 0.5),
+                    width: 2.0,
+                    radius: 5.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .width(Length::Fill);
 
-        row![
-            image_preview,
-            scrollable(controls).width(Length::Fixed(480.0)),
-            scrollable(right_column),
+            let new_column = column![rest_post_controls].padding(20);
+
             scrollable(new_column)
-        ]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+
+        pane_grid::PaneGrid::new(&self.panes, move |_, kind, _| {
+            let content: Element<'_, Message> = match *kind {
+                PaneKind::Preview => preview_pane(),
+                PaneKind::Controls => controls_pane(),
+                PaneKind::Tools => tools_pane(),
+                PaneKind::Rest => rest_pane(),
+            };
+            pane_grid::Content::new(content)
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .on_resize(10, |e| Message::PaneResized(e.split, e.ratio))
         .into()
     }
 }
@@ -1490,7 +1578,13 @@ fn decode_json_input(input: &str) -> String {
         .join("\n")
 }
 
-fn perform_pattern_lookup(sect_u_str: &str, sect_v_str: &str, x_str: &str, y_str: &str) -> String {
+fn perform_pattern_lookup(
+    sect_u_str: &str,
+    sect_v_str: &str,
+    x_str: &str,
+    y_str: &str,
+    size: usize,
+) -> String {
     let sect_u = match sect_u_str.parse::<i32>() {
         Ok(v) => v,
         Err(_) => return "Invalid Sect U".to_string(),
@@ -1508,14 +1602,16 @@ fn perform_pattern_lookup(sect_u_str: &str, sect_v_str: &str, x_str: &str, y_str
         Err(_) => return "Invalid Y".to_string(),
     };
 
+    let size = size.clamp(6, 100);
+
     let codec = anoto_6x6_a4_fixed();
-    let patch = codec.encode_patch((x, y), (6, 6), (sect_u, sect_v));
+    let patch = codec.encode_patch((x, y), (size, size), (sect_u, sect_v));
 
-    let mut arrows: Vec<Vec<&'static str>> = Vec::with_capacity(6);
+    let mut arrows: Vec<Vec<&'static str>> = Vec::with_capacity(size);
 
-    for r in 0..6 {
-        let mut row_arrows: Vec<&'static str> = Vec::with_capacity(6);
-        for c in 0..6 {
+    for r in 0..size {
+        let mut row_arrows: Vec<&'static str> = Vec::with_capacity(size);
+        for c in 0..size {
             let b0 = patch[[r, c, 0]];
             let b1 = patch[[r, c, 1]];
             let arrow = match (b0, b1) {
@@ -1530,9 +1626,37 @@ fn perform_pattern_lookup(sect_u_str: &str, sect_v_str: &str, x_str: &str, y_str
         arrows.push(row_arrows);
     }
 
-    // Return pure JSON for easy copy/paste into the decoder.
-    serde_json::to_string_pretty(&arrows)
-        .unwrap_or_else(|e| format!("Failed to format arrows JSON: {}", e))
+    pretty_print_arrow_grid_json(&arrows)
+}
+
+fn pretty_print_arrow_grid_json(arrows: &[Vec<&'static str>]) -> String {
+    // Format as valid JSON, one row per line, matching the requested style:
+    // [
+    //   ["↓","↓",...],
+    //   ["..."],
+    // ]
+    let mut out = String::new();
+    out.push_str("[\n");
+
+    for (row_idx, row) in arrows.iter().enumerate() {
+        out.push_str("  [");
+        for (col_idx, cell) in row.iter().enumerate() {
+            if col_idx > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            out.push_str(cell);
+            out.push('"');
+        }
+        out.push(']');
+        if row_idx + 1 != arrows.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+
+    out.push(']');
+    out
 }
 
 fn listen_for_post(rx: Arc<Mutex<mpsc::Receiver<String>>>) -> Task<Message> {
