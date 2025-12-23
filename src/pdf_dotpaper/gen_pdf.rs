@@ -105,10 +105,9 @@ pub fn gen_pdf_from_matrix_data(
     }
 
     doc.add_page(page);
-    let output_dir = std::env::current_dir().unwrap().join("output");
-    if !output_dir.exists() {
-        std::fs::create_dir(&output_dir)?;
-    }
+
+    let output_dir = std::env::current_dir()?.join("output");
+    std::fs::create_dir_all(&output_dir)?;
     let path = output_dir.join(filename);
     doc.save(path)?;
     Ok(())

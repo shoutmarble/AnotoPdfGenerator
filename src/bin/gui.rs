@@ -1921,13 +1921,12 @@ async fn generate_preview(params: GenerationParams) -> Result<PreviewResult, Str
             params.height, params.width, params.sect_u, params.sect_v
         );
 
-        if !std::path::Path::new("output").exists() {
-            std::fs::create_dir("output")?;
-        }
+        std::fs::create_dir_all("output")?;
 
         // Generate the Y-flipped matrix for the default preview.
+        // Avoid clone-then-overwrite; build the flipped matrix directly.
         let (h, w, d) = bitmatrix.dim();
-        let mut bitmatrix_y = bitmatrix.clone();
+        let mut bitmatrix_y = ndarray::Array3::<i32>::zeros((h, w, d));
         for y in 0..h {
             for x in 0..w {
                 for k in 0..d {
