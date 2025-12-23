@@ -2,13 +2,13 @@
 
 use anoto_pdf::anoto_matrix::generate_matrix_only;
 use anoto_pdf::controls::{anoto_control, page_layout_control, section_control};
-use anoto_pdf::make_plots::{draw_dot_on_file, draw_dots_on_file, draw_preview_image};
+use anoto_pdf::make_plots::draw_preview_image;
 use anoto_pdf::pdf_dotpaper::gen_pdf::{PdfConfig, gen_pdf_from_matrix_data};
 use anoto_pdf::persist_json::write_json_grid_rows;
 use iced::widget::image;
 use iced::widget::{
-    Action, button, canvas, column, container, row, scrollable, slider, space, text, text_editor,
-    text_input,
+    Action, button, canvas, checkbox, column, container, row, scrollable, slider, space, stack,
+    text, text_editor, text_input,
 };
 use iced::widget::pane_grid;
 use iced::{
@@ -75,6 +75,12 @@ struct Gui {
     points_status: String,
     seen_points: HashSet<(i64, i64)>,
 
+    auto_plot_decoder: bool,
+    decoder_points: Vec<(i64, i64)>,
+
+    overlay_points: Vec<(f64, f64)>,
+    overlay_seen: HashSet<(u64, u64)>,
+
     panes: pane_grid::State<PaneKind>,
 }
 
@@ -126,13 +132,47 @@ enum Message {
     DrawXChanged(String),
     DrawYChanged(String),
     DrawDotPressed,
-    DrawDotFinished(Result<image::Handle, String>),
     PreviewZoomed(f32, Point, (f32, f32)),
     PreviewPanned(Vector, (f32, f32)),
     PointsInputChanged(text_editor::Action),
     PlotAllPoints,
-    PlotAllPointsFinished(Result<image::Handle, String>),
+
+    ClearPlottedDots,
+
+    AutoPlotDecoderToggled(bool),
+    
     PaneResized(pane_grid::Split, f32),
+}
+
+fn pretty_print_points_by_row(points: &[(i64, i64)]) -> String {
+    if points.is_empty() {
+        return String::new();
+    }
+
+    let mut sorted = points.to_vec();
+    sorted.sort_by_key(|(x, y)| (*y, *x));
+
+    let mut out = String::new();
+    let mut current_y: Option<i64> = None;
+    let mut first_in_row = true;
+
+    for (x, y) in sorted {
+        if current_y != Some(y) {
+            if current_y.is_some() {
+                out.push('\n');
+            }
+            current_y = Some(y);
+            first_in_row = true;
+        }
+
+        if !first_in_row {
+            out.push_str(", ");
+        }
+        first_in_row = false;
+        out.push_str(&format!("({}, {})", x, y));
+    }
+
+    out
 }
 
 impl Default for Gui {
@@ -188,6 +228,12 @@ impl Default for Gui {
             points_status: "Ready".to_string(),
             seen_points: HashSet::new(),
 
+            auto_plot_decoder: false,
+            decoder_points: Vec::new(),
+
+            overlay_points: Vec::new(),
+            overlay_seen: HashSet::new(),
+
             panes,
         }
     }
@@ -208,14 +254,14 @@ struct ImageViewerState {
     last_cursor_pos: Option<Point>,
 }
 
-struct ImageViewer<'a> {
+struct BaseImageViewer<'a> {
     handle: &'a image::Handle,
     zoom: f32,
     pan: Vector,
     image_size: (f32, f32),
 }
 
-impl<'a> canvas::Program<Message> for ImageViewer<'a> {
+impl<'a> canvas::Program<Message> for BaseImageViewer<'a> {
     type State = ImageViewerState;
 
     fn update(
@@ -300,6 +346,71 @@ impl<'a> canvas::Program<Message> for ImageViewer<'a> {
         };
 
         frame.draw_image(dest, canvas::Image::new(self.handle.clone()));
+
+        vec![frame.into_geometry()]
+    }
+}
+
+struct OverlayViewer<'a> {
+    zoom: f32,
+    pan: Vector,
+    overlay_points: &'a [(f64, f64)],
+    matrix_size: (usize, usize),
+    config: &'a PdfConfig,
+}
+
+impl<'a> canvas::Program<Message> for OverlayViewer<'a> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        if self.overlay_points.is_empty() {
+            return vec![frame.into_geometry()];
+        }
+
+        // Coordinates are interpreted the same way as the previous on-disk drawing:
+        // (0,0) is the upper-left dot in screen/pixel coordinates.
+        let a4_width_pts: f32 = 595.276;
+        let a4_height_pts: f32 = 841.89;
+        let scale: f32 = self.config.dpi as f32 / 72.0;
+
+        let (matrix_height, matrix_width) = (self.matrix_size.0, self.matrix_size.1);
+        if matrix_height < 2 || matrix_width < 2 {
+            return vec![frame.into_geometry()];
+        }
+
+        let grid_width_pts = (matrix_width as f32 - 1.0) * self.config.grid_spacing;
+        let grid_height_pts = (matrix_height as f32 - 1.0) * self.config.grid_spacing;
+
+        let margin_x_pts = (a4_width_pts - grid_width_pts) * 0.5;
+        let margin_y_pts = (a4_height_pts - grid_height_pts) * 0.5;
+
+        let radius_px = (self.config.dot_size * scale * 2.0).max(5.0);
+        // Keep dots visible even when the user zooms far out.
+        let radius_screen = (radius_px * self.zoom).max(4.0);
+        let color = Color::from_rgba(1.0, 0.0, 0.0, 1.0);
+
+        for &(x, y) in self.overlay_points {
+            let x_pos_pt = margin_x_pts + (x as f32) * self.config.grid_spacing;
+            let y_pos_pt = margin_y_pts + (y as f32) * self.config.grid_spacing;
+
+            let x_px = x_pos_pt * scale;
+            let y_px = y_pos_pt * scale;
+
+            let screen_x = self.pan.x + x_px * self.zoom;
+            let screen_y = self.pan.y + y_px * self.zoom;
+
+            let path = canvas::Path::circle(Point::new(screen_x, screen_y), radius_screen);
+            frame.fill(&path, color);
+        }
 
         vec![frame.into_geometry()]
     }
@@ -572,24 +683,47 @@ impl Gui {
 
                     let positions = extract_positions_from_decode_output(&decode_res);
                     if !positions.is_empty() {
-                        let mut new_lines: Vec<String> = Vec::new();
+                        // Auto-empty when a new Anoto-dot pattern is decoded.
+                        // This clears the previous decoded points text area.
+                        self.seen_points.clear();
+                        self.decoder_points.clear();
+                        self.points_input = text_editor::Content::new();
+
+                        let mut newly_added: Vec<(i64, i64)> = Vec::new();
                         for (x, y) in positions {
                             if self.seen_points.insert((x, y)) {
-                                new_lines.push(format!("({}, {})", x, y));
+                                self.decoder_points.push((x, y));
+                                newly_added.push((x, y));
                             }
                         }
 
-                        if !new_lines.is_empty() {
-                            let current_text = self.points_input.text();
-                            let appended = new_lines.join("\n");
-                            let new_text = if current_text.is_empty() {
-                                appended
+                        if !newly_added.is_empty() {
+                            // Pretty-print grouped by row (same Y).
+                            let pretty = pretty_print_points_by_row(&self.decoder_points);
+                            self.points_input = text_editor::Content::with_text(&pretty);
+
+                            let mut auto_plotted = 0usize;
+                            if self.auto_plot_decoder {
+                                for (x, y) in &newly_added {
+                                    let xf = *x as f64;
+                                    let yf = *y as f64;
+                                    if self.overlay_seen.insert((xf.to_bits(), yf.to_bits())) {
+                                        self.overlay_points.push((xf, yf));
+                                        auto_plotted += 1;
+                                    }
+                                }
+                            }
+
+                            if self.auto_plot_decoder {
+                                self.points_status = format!(
+                                    "Decoded {} new point(s); auto-plotted {}",
+                                    newly_added.len(),
+                                    auto_plotted
+                                );
                             } else {
-                                format!("{}\n{}", current_text, appended)
-                            };
-                            self.points_input = text_editor::Content::with_text(&new_text);
-                            self.points_status =
-                                format!("Decoded {} new point(s)", new_lines.len());
+                                self.points_status =
+                                    format!("Decoded {} new point(s)", newly_added.len());
+                            }
                         } else {
                             self.points_status = "Decoded (no new points)".to_string();
                         }
@@ -690,6 +824,10 @@ impl Gui {
                         self.image_height = h;
                         self.preview_zoom = 1.0;
                         self.preview_pan = Vector::new(0.0, 0.0);
+
+                        // New base image => clear fast overlay.
+                        self.overlay_points.clear();
+                        self.overlay_seen.clear();
                     }
                     Err(e) => self.status_message = format!("Error: {}", e),
                 }
@@ -705,66 +843,33 @@ impl Gui {
                 }
             }
             Message::DrawDotPressed => {
-                if let Some(path) = &self.current_png_path {
+                if self.generated_image_handle.is_none() {
+                    self.draw_status = "Generate PDF first!".to_string();
+                } else {
                     let x = self.draw_x.parse::<f64>().unwrap_or(0.0);
                     let y = self.draw_y.parse::<f64>().unwrap_or(0.0);
-                    let config = self.config.clone();
-                    let matrix_width = self.width;
-                    let matrix_height = self.height;
-                    let path_clone = path.clone();
-
-                    self.draw_status = "Drawing dot...".to_string();
-
-                    return Task::perform(
-                        async move {
-                            match draw_dot_on_file(
-                                &path_clone,
-                                x,
-                                y,
-                                matrix_height,
-                                matrix_width,
-                                &config,
-                            ) {
-                                Ok(_) => {
-                                    // Reload the image
-                                    match std::fs::read(&path_clone) {
-                                        Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        },
-                        Message::DrawDotFinished,
-                    );
-                } else {
-                    self.draw_status = "Generate PDF first!".to_string();
-                }
-            }
-            Message::DrawDotFinished(result) => match result {
-                Ok(handle) => {
-                    self.draw_status = "Dot drawn!".to_string();
-                    self.generated_image_handle = Some(handle);
-                }
-                Err(e) => self.draw_status = format!("Error: {}", e),
-            },
-            Message::PointsInputChanged(action) => {
-                self.points_input.perform(action);
-
-                // Keep the dedupe set consistent with what's currently in the editor.
-                // This prevents a mismatch where the user clears/edits the box but we still
-                // treat old points as "seen".
-                self.seen_points.clear();
-                for (x, y) in parse_points(&self.points_input.text()) {
-                    let rx = x.round();
-                    let ry = y.round();
-                    if (x - rx).abs() < 1e-9 && (y - ry).abs() < 1e-9 {
-                        self.seen_points.insert((rx as i64, ry as i64));
+                    if self.overlay_seen.insert((x.to_bits(), y.to_bits())) {
+                        self.overlay_points.push((x, y));
+                        self.draw_status = "Dot added (overlay)".to_string();
+                    } else {
+                        self.draw_status = "Dot already present".to_string();
                     }
                 }
             }
+            Message::PointsInputChanged(action) => {
+                self.points_input.perform(action);
+
+                // Avoid re-parsing potentially huge text on every keystroke.
+                // Keep the dedupe set in sync only when the user clears the box.
+                if self.points_input.text().trim().is_empty() {
+                    self.seen_points.clear();
+                    self.decoder_points.clear();
+                }
+            }
             Message::PlotAllPoints => {
-                if let Some(path) = &self.current_png_path {
+                if self.generated_image_handle.is_none() {
+                    self.points_status = "Generate PDF first!".to_string();
+                } else {
                     let text = self.points_input.text();
                     let mut points = parse_points(&text);
 
@@ -783,57 +888,41 @@ impl Gui {
                             })
                             .collect();
                     }
+
                     if points.is_empty() {
                         self.points_status = "No valid points found".to_string();
                     } else {
-                        // Deduplicate points before plotting
-                        let mut seen: HashSet<(u64, u64)> = HashSet::new();
-                        points.retain(|(x, y)| {
-                            // Deduplicate exact float values without truncation.
-                            // This keeps distinct points distinct even if they share the same integer part.
-                            seen.insert((x.to_bits(), y.to_bits()))
-                        });
+                        // If the points are whole numbers, pretty-print them grouped by row (same Y).
+                        if points.iter().all(|(x, y)| x.fract() == 0.0 && y.fract() == 0.0) {
+                            let ints: Vec<(i64, i64)> = points
+                                .iter()
+                                .map(|(x, y)| (*x as i64, *y as i64))
+                                .collect();
+                            let pretty = pretty_print_points_by_row(&ints);
+                            if !pretty.is_empty() {
+                                self.points_input = text_editor::Content::with_text(&pretty);
+                            }
+                        }
 
-                        let config = self.config.clone();
-                        let matrix_width = self.width;
-                        let matrix_height = self.height;
-                        let path_clone = path.clone();
-
-                        self.points_status = format!("Plotting {} points...", points.len());
-
-                        return Task::perform(
-                            async move {
-                                match draw_dots_on_file(
-                                    &path_clone,
-                                    &points,
-                                    matrix_height,
-                                    matrix_width,
-                                    &config,
-                                ) {
-                                    Ok(_) => {
-                                        // Reload the image
-                                        match std::fs::read(&path_clone) {
-                                            Ok(bytes) => Ok(image::Handle::from_bytes(bytes)),
-                                            Err(e) => Err(e.to_string()),
-                                        }
-                                    }
-                                    Err(e) => Err(e.to_string()),
-                                }
-                            },
-                            Message::PlotAllPointsFinished,
-                        );
+                        let mut added = 0usize;
+                        for (x, y) in points {
+                            if self.overlay_seen.insert((x.to_bits(), y.to_bits())) {
+                                self.overlay_points.push((x, y));
+                                added += 1;
+                            }
+                        }
+                        self.points_status = format!("Plotted {} point(s) (overlay)", added);
                     }
-                } else {
-                    self.points_status = "Generate PDF first!".to_string();
                 }
             }
-            Message::PlotAllPointsFinished(result) => match result {
-                Ok(handle) => {
-                    self.points_status = "Points plotted!".to_string();
-                    self.generated_image_handle = Some(handle);
-                }
-                Err(e) => self.points_status = format!("Error: {}", e),
-            },
+            Message::ClearPlottedDots => {
+                self.overlay_points.clear();
+                self.overlay_seen.clear();
+                self.points_status = "Cleared plotted dots".to_string();
+            }
+            Message::AutoPlotDecoderToggled(v) => {
+                self.auto_plot_decoder = v;
+            }
             Message::PreviewZoomed(delta, cursor, viewport) => {
                 self.zoom_at(delta, cursor, viewport);
             }
@@ -863,12 +952,25 @@ impl Gui {
             if let Some(handle) = &self.generated_image_handle {
                 container(
                     container(
-                        canvas::Canvas::new(ImageViewer {
-                            handle,
-                            zoom: self.preview_zoom,
-                            pan: self.preview_pan,
-                            image_size: (self.image_width as f32, self.image_height as f32),
-                        })
+                        stack![
+                            canvas::Canvas::new(BaseImageViewer {
+                                handle,
+                                zoom: self.preview_zoom,
+                                pan: self.preview_pan,
+                                image_size: (self.image_width as f32, self.image_height as f32),
+                            })
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                            canvas::Canvas::new(OverlayViewer {
+                                zoom: self.preview_zoom,
+                                pan: self.preview_pan,
+                                overlay_points: &self.overlay_points,
+                                matrix_size: (self.height, self.width),
+                                config: &self.config,
+                            })
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                        ]
                         .width(Length::Fill)
                         .height(Length::Fill),
                     )
@@ -1266,12 +1368,19 @@ impl Gui {
                     text("Ready to decode").size(14),
                     space().height(Length::Fixed(20.0)),
                     text("(X,Y) Decoder").size(20),
+                    checkbox(self.auto_plot_decoder)
+                        .label("Auto-plot incoming positions")
+                        .on_toggle(Message::AutoPlotDecoderToggled),
                     text_editor(&self.points_input)
                         .on_action(Message::PointsInputChanged)
                         .height(Length::Fixed(150.0))
                         .font(iced::font::Font::MONOSPACE),
                     button("Plot on A4")
                         .on_press(Message::PlotAllPoints)
+                        .padding(10)
+                        .width(Length::Fill),
+                    button("Clear plotted dots")
+                        .on_press(Message::ClearPlottedDots)
                         .padding(10)
                         .width(Length::Fill),
                     text(&self.points_status).size(14),
